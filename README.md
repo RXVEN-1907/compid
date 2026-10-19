@@ -52,7 +52,7 @@ the part a hunch never does.
 ## Quickstart
 
 Rust 1.75 or newer, on Linux or macOS. The classifier runs on any architecture
-Rust compiles for; today it reads ELF files.
+Rust compiles for; today it reads ELF and PE (x86-64) files.
 
 ```console
 $ cargo install --path .
@@ -63,21 +63,21 @@ Two commands to start with - classify a binary, then ask why:
 ```console
 $ compid classify /tmp/sample
 binary: /tmp/sample
-model:   model/model.json (trained 2026-10-20, 6253 features)
+model:   model/model.json (trained 2026-10-20, 43896 features)
 build-id: d1294f531713bb3802b7f5a57fe5c1e6ab895e3f
 
 compiler_family
-  0. gcc    99.96%  ####################
-  1. clang   0.04%
+  0. gcc    99.93%  ####################
+  1. clang   0.07%
 
 compiler_version
-  0. 13.3.0  99.96%  ####################
-  1. 19.1.7   0.04%
+  0. 13.3.0  99.94%  ####################
+  1. 19.1.7   0.06%
 
 opt_level
-  0. O0    85.12%  #################
-  1. O2     7.97%  ##
-  2. Os     3.95%  #
+  0. O0    83.88%  #################
+  1. O2     8.02%  ##
+  2. Os     4.72%  #
 
 pie
   0. no-pie  87.97%  ##################
@@ -85,17 +85,17 @@ pie
 ```
 
 That sample is a real binary from the seed dataset (gcc 13.3.0, -O0, no-PIE);
-`arch`, `abi`, `lto`, and `static` all land above 99.9% on the same run, and
+`arch`, `abi`, `lto`, and `static` all land above 99.7% on the same run, and
 the table above is elided to the interesting fields.
 
 ```console
 $ compid explain /tmp/sample
-arch: x86_64 (100.0% confidence)
+arch: x86_64 (99.7% confidence)
   top contributing features:
-    ng:000000      +2.9837  (tf=45)
-    ng:000048      +0.3751  (tf=12)
-    mn:mov         +0.3703  (tf=17)
-    rg:rax         +0.3056  (tf=25)
+    ng:000000      +2.0451  (tf=45)
+    mn:mov         +0.3609  (tf=17)
+    ng:000048      +0.2839  (tf=12)
+    rg:rax         +0.2421  (tf=25)
 ```
 
 See [`examples/demo-transcript.md`](examples/demo-transcript.md) for a fuller
@@ -141,19 +141,19 @@ spots - lives in [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
 | field | classes | rows | top-1 | top-3 |
 |-------|---------|------|-------|-------|
-| compiler_family | 2 | 751 | 1.0000 | 1.0000 |
-| compiler_version | 2 | 751 | 1.0000 | 1.0000 |
-| opt_level | 6 | 751 | 0.8411 | 0.9934 |
-| arch | 2 | 751 | 1.0000 | 1.0000 |
-| os | 1 | 751 | - | not modeled |
-| abi | 2 | 751 | 1.0000 | 1.0000 |
-| pie | 2 | 751 | 1.0000 | 1.0000 |
-| lto | 2 | 751 | 0.9338 | 1.0000 |
-| static | 2 | 751 | 0.9934 | 1.0000 |
+| compiler_family | 2 | 1155 | 1.0000 | 1.0000 |
+| compiler_version | 2 | 1155 | 1.0000 | 1.0000 |
+| opt_level | 6 | 1155 | 0.8918 | 0.9784 |
+| arch | 4 | 1155 | 1.0000 | 1.0000 |
+| os | 2 | 1155 | 1.0000 | 1.0000 |
+| abi | 2 | 1155 | 0.9567 | 1.0000 |
+| pie | 3 | 1155 | 1.0000 | 1.0000 |
+| lto | 2 | 1155 | 0.9567 | 1.0000 |
+| static | 3 | 1155 | 1.0000 | 1.0000 |
 
-`os` is not modeled because the ELF-only seed contains a single class
-(linux); `lto` sits at its majority baseline until the matrix gains more
-LTO-built rows.
+`arch` covers x86-64, aarch64, riscv64, and arm32; `os` separates ELF from
+PE. `lto` sits at its majority baseline until the matrix gains more
+LTO-built rows, and `opt_level`'s confusion is concentrated in O2/O3 pairs.
 
 ## Expanding the matrix
 

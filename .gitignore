@@ -9,3 +9,6 @@ dataset/features/train.jsonl
 # Python virtual environments and caches
 .venv/
 __pycache__/
+
+# Sharded feature archives (reassemble: cat train.jsonl.gz.* | gunzip > train.jsonl)
+dataset/features/train.jsonl.gz

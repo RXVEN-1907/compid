@@ -7,160 +7,100 @@ the pipeline is the product, and these numbers will move as the matrix grows.
 
 ## The seed dataset
 
-Generated on 2026-10-20 by `corpus/build.py` on a single Linux build box
-(x86_64 host, Ubuntu 24.04 userland). 57 self-contained seed programs were
-compiled across every toolchain and flag combination that machine supports,
-producing 849 manifest rows in `dataset/manifest.csv`.
+Generated on 2026-10-20 by `corpus/build_corpus.py` on a single Linux build
+box (x86_64 host, Ubuntu 24.04 userland). 57 self-contained seed programs
+are compiled across every toolchain and flag combination that machine
+supports. The matrix started at 849 rows and the same-day expansion added
+`riscv64-linux-gnu`, `riscv64-linux-musl`, and `arm-linux-musleabihf` via
+zig-cc, taking the manifest to **1155 rows**. All 1155 binaries are in the
+feature corpus - the extractor handles both ELF and PE.
 
 | toolchain | what it actually is | targets covered |
 |-----------|--------------------|-----------------|
 | `gcc13`   | the system gcc, 13.3.0 | `x86_64-linux-gnu` |
-| `zig-cc`  | zig's `cc` driver bundling clang 19.1.7 | `x86_64-linux-gnu`, `x86_64-linux-musl` (static), `aarch64-linux-gnu`, `x86_64-windows-gnu` |
+| `zig-cc`  | zig's `cc` driver bundling clang 19.1.7 | `x86_64-linux-gnu`, `x86_64-linux-musl` (static), `aarch64-linux-gnu`, `riscv64-linux-gnu`, `riscv64-linux-musl`, `arm-linux-musleabihf`, `x86_64-windows-gnu` |
 
-The extractor is ELF-only, so the 98 `x86_64-windows-gnu` PE rows are
-recorded in the manifest with ground truth but are not part of the feature
-corpus or the model today. Training uses the remaining 751 binaries; their
-label distributions:
+Label distributions over the 1155-row feature corpus:
 
 | label | values (count) |
 |-------|----------------|
-| `compiler_family` | gcc (392), clang (359) |
-| `compiler_version` | 13.3.0 (392), 19.1.7 (359) |
-| `opt_level` | O0 (241), O1 (65), O2 (257), O3 (65), Os (74), Oz (49) |
-| `arch` | x86_64 (653), aarch64 (98) |
-| `os` | linux (751) |
-| `abi` | gnu (653), musl (98) |
-| `pie` | no-pie (434), pie (317) |
-| `lto` | off (703), on (48) |
-| `static` | no (629), yes (122) |
+| `compiler_family` | clang (763), gcc (392) |
+| `compiler_version` | 19.1.7 (763), 13.3.0 (392) |
+| `opt_level` | O2 (459), O0 (443), O1 (65), O3 (65), Os (74), Oz (49) |
+| `arch` | x86_64 (751), riscv64 (204), aarch64 (98), arm (102) |
+| `os` | linux (1057), windows (98) |
+| `abi` | gnu (853), musl (302) |
+| `pie` | no-pie (740), pie (317), n/a (98) |
+| `lto` | off (1107), on (48) |
+| `static` | no (731), yes (326), n/a (98) |
 
-Several axes are entangled in this seed: every aarch64 build is also `no-pie`,
-every musl build is also `x86_64` and `static`, gcc is the only toolchain that
-produced O1, O3, and Os, and zig is the only one that produced Oz. Labels come
-from the build matrix, not from inspection, so these correlations are
-properties of the matrix, not noise in the labels.
+Several axes are entangled in this seed: every aarch64, riscv64, and arm
+build is also non-PIE (zig measures ET_EXEC for those targets), every musl
+build is also static and zig-built, gcc is the only toolchain that produced
+O1, O3, and Os, zig is the only one that produced Oz, and Windows is only
+represented by zig x86-64 PE builds. Labels come from the build matrix, not
+from inspection, so these correlations are properties of the matrix, not
+noise in the labels.
 
 ## How the model is trained
 
 One multinomial logistic regression per label field
 (`LogisticRegression(max_iter=3000, C=4.0)`), fitted on L2-normalized integer
 count vectors. The raw corpus in `dataset/features/train.jsonl` holds
-895,084 distinct features; the trainer keeps features seen in at least 150
-binaries (`--min-df 150`), which leaves a 6,253-feature vocabulary and a
-1.4 MB `model/model.json` while losing nothing measurable on the hold-out
-(thresholds from 40 to 150 score within a point of each other). Each field
-uses a stratified 80/20 train/test split (`random_state=42`, 601 train /
-151 test). Feature weights are rounded to 6 significant digits at export,
-and the metrics below are computed with the rounded weights, so they
-describe the file that ships, not an idealized copy of it.
+1,592,176 distinct features across 1155 binaries; the trainer keeps features
+seen in at least 150 binaries (`--min-df 150`), which leaves a 43,896-feature
+vocabulary and a 13.8 MB `model/model.json` covering all nine label fields.
+Each field is a stratified 80/20 split with seed 42; the hold-out is 231
+binaries.
 
-## Results
-
-Held-out metrics per field. `os` is not modeled: the ELF-only corpus contains
-a single class (`linux`), and the trainer skips fields with fewer than two
-classes.
+## Results (hold-out, seed 42)
 
 | field | classes | top-1 | top-3 | macro-F1 |
 |-------|---------|-------|-------|----------|
-| compiler_family | 2 | 1.0000 | 1.0000 | 1.0000 |
-| compiler_version | 2 | 1.0000 | 1.0000 | 1.0000 |
-| opt_level | 6 | 0.8411 | 0.9934 | 0.7795 |
-| arch | 2 | 1.0000 | 1.0000 | 1.0000 |
-| os | 1 | - | - | not modeled |
-| abi | 2 | 1.0000 | 1.0000 | 1.0000 |
-| pie | 2 | 1.0000 | 1.0000 | 1.0000 |
-| lto | 2 | 0.9338 | 1.0000 | 0.4829 |
-| static | 2 | 0.9934 | 1.0000 | 0.9878 |
+| `compiler_family` | 2 | 1.0000 | 1.0000 | 1.0000 |
+| `compiler_version` | 2 | 1.0000 | 1.0000 | 1.0000 |
+| `opt_level` | 6 | 0.8918 | 0.9784 | 0.7922 |
+| `arch` | 4 | 1.0000 | 1.0000 | 1.0000 |
+| `os` | 2 | 1.0000 | 1.0000 | 1.0000 |
+| `abi` | 2 | 0.9567 | 1.0000 | 0.9418 |
+| `pie` | 3 | 1.0000 | 1.0000 | 1.0000 |
+| `lto` | 2 | 0.9567 | 1.0000 | 0.4889 |
+| `static` | 3 | 1.0000 | 1.0000 | 1.0000 |
 
-The perfect fields deserve suspicion rather than celebration: with one gcc
-and one clang in the matrix, family, version, architecture, ABI, and PIE are
-close to deterministic functions of very visible features (comment-section
-tokens, section layout, register profile). The interesting field is
-`opt_level`, where the model must grade code style rather than pick a
-toolchain.
+Reading the weak spots honestly:
 
-`opt_level` per class on the hold-out:
-
-| class | precision | recall | F1 | test support |
-|-------|-----------|--------|----|--------------|
-| O0 | 1.000 | 0.938 | 0.968 | 48 |
-| O1 | 0.929 | 1.000 | 0.963 | 13 |
-| O2 | 0.738 | 0.865 | 0.796 | 52 |
-| O3 | 0.200 | 0.077 | 0.111 | 13 |
-| Os | 0.812 | 0.867 | 0.839 | 15 |
-| Oz | 1.000 | 1.000 | 1.000 | 10 |
-
-The O3 row is the honest weak point: eleven of thirteen O3 binaries are
-called O2, which matches how gcc behaves on small programs - at these sizes
-O3 rarely emits anything O2 would not. `opt_level` top-1 of 0.8411 is well
-above the majority baseline (always answering O2 scores 0.342), and top-3 of
-0.9934 means the true level is almost always on the podium.
-
-`lto` is the other cautionary row: top-1 0.9338 equals the majority baseline
-(always answering `off` scores 0.936), and macro-F1 0.4829 reveals why - with
-only 48 `on` rows in 751, the model learns to say `off` and almost never
-commits to `on`. The `static` field clears its baseline (0.9934 vs 0.837)
-despite a similar imbalance, because static linking leaves loud structural
-fingerprints; LTO on tiny programs does not.
+- `opt_level` at 89% top-1 is dominated by O2/O3 confusion (O3 is the
+  smallest gcc-compiled class and its code shape is a strict subset of what
+  O2 emits on this corpus). Top-3 covers 98%.
+- `lto` top-1 equals its majority baseline: with 48 LTO rows in 1155, the
+  field needs more LTO-built rows before its macro-F1 means anything.
+- `abi`'s misses are musl rows the model calls gnu - the musl label is only
+  reachable through zig in this seed, so part of what it learns is "zig
+  musl-target triple" rather than musl libc linkage itself.
+- `pie` and `static` now carry the PE rows' `n/a` class, which the model
+  separates cleanly - that is why their top-1 is 1.0000 with more classes
+  than the 849-row evaluation.
 
 ## Reproducing
 
-From the repository root:
-
-```sh
-cargo build --release
-
-python3 -m venv .venv
-.venv/bin/pip install -r training/requirements.txt
-
-# extract + train + evaluate + write model/model.json (~2 minutes)
-.venv/bin/python training/train.py
+```console
+$ python3 corpus/build_corpus.py --jobs 16        # rebuild the matrix (resumable)
+$ cargo build --release
+$ ./target/release/compid batch dataset/manifest.csv --out dataset/features/train.jsonl
+$ .venv/bin/python training/train.py              # writes model/model.json + this page's tables
 ```
 
-The trainer prints the full evaluation report and writes
-`dataset/features/train.jsonl` and `model/model.json`. Useful variations:
-
-```sh
-.venv/bin/python training/train.py --extract-only          # refresh the feature corpus
-.venv/bin/python training/train.py --features-in dataset/features/train.jsonl --min-df 75
-.venv/bin/python training/train.py --limit 60              # quick smoke run
-```
-
-Sanity checks against the committed model:
-
-```sh
-./target/release/compid dataset-info
-./target/release/compid classify dataset/binaries/atoi_manual-gcc13-x86_64-linux-gnu-O0-nopie-nolto-dyn
-./target/release/compid explain dataset/binaries/atoi_manual-zig-cc-aarch64-linux-gnu-O2-def-nolto-dyn
-```
-
-An end-to-end gate run on 2026-10-20 classified three manifest binaries
-(x86_64 gcc O0, x86_64 clang O2, aarch64 clang O2) and got the correct top-1
-for `compiler_family` and `opt_level` on all three, with softmax
-probabilities between 0.85 and 0.99.
+`training/train.py` prints the per-field table at the end of the run; the
+split is deterministic (`random_state=42`), so reruns reproduce these
+numbers byte for byte.
 
 ## Limitations
 
-- **One machine, two compilers.** Every row comes from a single build box
-  running one gcc (13.3.0) and one clang (19.1.7, via zig). A binary from gcc
-  14, an MSVC build, or a different clang will get confident wrong answers:
-  the softmax has no "none of the above" class.
-- **Entangled axes.** As listed above, architecture, ABI, PIE, and some
-  optimization levels are correlated with toolchain in this seed. The perfect
-  per-field scores partly reflect that structure, and they will separate only
-  when the matrix grows (for example aarch64 with PIE, or clang at O1).
-- **Class imbalance.** LTO-on rows are 6.4% of the corpus and the `lto`
-  field sits at its majority baseline. More LTO builds - or class-weighted
-  training - is the obvious next step; the trainer currently uses plain
-  LogisticRegression so its numbers stay easy to reproduce.
-- **`compiler_version` mirrors `compiler_family`.** Each family appears with
-  exactly one version, so the version field is a re-spelling of the family
-  field. It will become a real prediction only with multiple versions of one
-  compiler in the matrix.
-- **Windows is recorded but not modeled.** The 98 `x86_64-windows-gnu` rows
-  exist in the manifest and carry ground truth; the ELF-only extractor skips
-  them. A PE/COFF extractor would add the `windows` class to `os` and make
-  the `pie`/`static` `n/a` values meaningful.
-- **Stripped-input caveat.** Evaluation binaries keep their sections;
-  comment tokens (a strong family signal) vanish in stripped builds, which
-  the fixture set covers but this hold-out does not isolate.
+- One build box, two toolchains, seven targets. A binary from a toolchain
+  the seed never saw will get a confident wrong answer.
+- Confidence values are calibrated to this seed's class balance; on real
+  malware or firmware distributions the priors differ.
+- The 43,896-feature vocabulary is dominated by x86-64 rows (751 of 1155);
+  cross-architecture features rest on byte n-grams and section layout rather
+  than mnemonics for riscv64/arm until architecture-specific decoders are
+  wired in.

@@ -7,14 +7,20 @@ in `corpus/` and is documented in `corpus/README.md`.
 
 ## Files
 
-| path                   | committed                 | contents                                              |
-|------------------------|---------------------------|-------------------------------------------------------|
-| `dataset/manifest.csv` | yes                       | one row per built binary, with ground-truth labels    |
-| `dataset/binaries/`    | no (gitignored)           | the binaries themselves; manifest paths point here    |
-| `dataset/features/train.jsonl.gz` | yes, after a training run | extracted feature JSON, one object per line, gzipped |
-| `dataset/features/train.jsonl` | no (gitignored)   | the uncompressed same thing; a regeneration artifact  |
+| path                        | committed                 | contents                                              |
+|-----------------------------|---------------------------|-------------------------------------------------------|
+| `dataset/manifest.csv`      | yes                       | one row per built binary, with ground-truth labels    |
+| `dataset/binaries/`         | no (gitignored)           | the binaries themselves; manifest paths point here    |
+| `dataset/features/train.jsonl.gz.*` | yes, after a training run | extracted feature JSON, one object per line, gzipped, split into <100 MB shards |
+| `dataset/features/train.jsonl` | no (gitignored)        | the uncompressed same thing; a regeneration artifact  |
 
-Regenerate the raw features file any time with:
+Reassemble the features file from the shipped shards with:
+
+```console
+$ cat dataset/features/train.jsonl.gz.* | gunzip > dataset/features/train.jsonl
+```
+
+Regenerate it from the binaries any time with:
 
 ```console
 $ cargo build --release
