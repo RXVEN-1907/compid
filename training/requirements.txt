@@ -1,0 +1,4 @@
+# Trainer dependencies. Tested against the versions below (Python 3.11+);
+# nearby 3.x versions of each package are expected to work.
+scikit-learn>=1.6,<2.0
+numpy>=1.26,<3.0
