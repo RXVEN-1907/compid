@@ -1,0 +1,330 @@
+//! Feature extraction: turn an [`ElfInfo`] into the tf feature map the
+//! trainer and the classifier share.
+//!
+//! Feature keys, exactly as the project contract defines them:
+//!
+//! | prefix | meaning |
+//! |--------|---------|
+//! | `ng:<hex>` | byte 3-gram counts over the raw `.text` bytes |
+//! | `mn:<name>` | disassembled mnemonic counts |
+//! | `rg:<reg>` | register occurrence counts (operands and memory bases) |
+//! | `cn:<hex>` | immediate constants masked to 32 bits |
+//! | `sec:<s>` | floor(log2(section size)) for each named section |
+//! | `ent:<s>` | Shannon-entropy bucket 0..=8 of each section's bytes |
+//! | `meta:windows` | number of cleanly disassembling 64-byte windows |
+//! | `cmt:<tok>` | tokens from the `.comment` section |
+//!
+//! Disassembly windows are consecutive non-overlapping 64-byte chunks of
+//! `.text`. A window "disassembles cleanly" when decoding from its first
+//! byte consumes exactly the window with no decode errors; only clean
+//! windows contribute mnemonic, register, and immediate counts, so every
+//! instruction is counted at most once. Byte 3-grams run over the raw bytes
+//! regardless of decode success, which is what makes the feature work on
+//! data sections and on packers that break disassembly.
+//!
+//! All counts are raw integers; L2 normalization happens at train and infer
+//! time, never in the stored JSON.
+
+use crate::elfinfo::ElfInfo;
+use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use yaxpeax_arch::LengthedInstruction;
+use yaxpeax_x86::long_mode::{InstDecoder, Operand};
+
+/// Disassembly window size in bytes.
+pub const WINDOW_SIZE: usize = 64;
+
+/// The nine provenance labels attached to every feature record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Labels {
+    pub compiler_family: String,
+    pub compiler_version: String,
+    pub opt_level: String,
+    pub arch: String,
+    pub os: String,
+    pub abi: String,
+    pub pie: String,
+    pub lto: String,
+    #[serde(rename = "static")]
+    pub static_linking: String,
+}
+
+/// One extracted binary: provenance labels plus its feature vector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractedFeatures {
+    pub build_id: String,
+    pub labels: Labels,
+    pub features: BTreeMap<String, u64>,
+}
+
+impl ExtractedFeatures {
+    pub fn new(build_id: String, labels: Labels) -> Self {
+        ExtractedFeatures {
+            build_id,
+            labels,
+            features: BTreeMap::new(),
+        }
+    }
+
+    fn bump(&mut self, key: String) {
+        *self.features.entry(key).or_insert(0) += 1;
+    }
+}
+
+/// Extract the full feature map from parsed ELF material.
+pub fn extract(info: &ElfInfo) -> Result<ExtractedFeatures> {
+    let text = match &info.text {
+        Some(t) if !t.is_empty() => t,
+        Some(_) => bail!("binary has an empty .text section; nothing to fingerprint"),
+        None => bail!(
+            "binary has no readable .text section (stripped section headers?); \
+             compid needs section headers to find executable bytes"
+        ),
+    };
+
+    let mut ef = ExtractedFeatures::new(info.build_id.clone(), labels_from(info));
+
+    // Byte 3-grams over the whole .text, one byte at a time.
+    for gram in text.windows(3) {
+        let key = format!("ng:{:02x}{:02x}{:02x}", gram[0], gram[1], gram[2]);
+        ef.bump(key);
+    }
+
+    // Windowed disassembly.
+    let decoder = InstDecoder::default();
+    let mut windows = 0u64;
+    for window in text.chunks_exact(WINDOW_SIZE) {
+        if let Some(stats) = disassemble_window(&decoder, window) {
+            windows += 1;
+            for m in &stats.mnemonics {
+                ef.bump(format!("mn:{m}"));
+            }
+            for r in &stats.registers {
+                ef.bump(format!("rg:{r}"));
+            }
+            for imm in &stats.immediates {
+                ef.bump(format!("cn:{imm:x}"));
+            }
+        }
+    }
+    ef.features.insert("meta:windows".to_string(), windows);
+
+    // Section geometry and byte entropy.
+    for s in &info.sections {
+        if s.size > 0 {
+            ef.features
+                .insert(format!("sec:{}", s.name), log2_size(s.size));
+        }
+        if !s.no_bits && s.size > 0 {
+            let bytes = info.section_data(s.offset, s.size);
+            ef.features
+                .insert(format!("ent:{}", s.name), entropy_bucket(&bytes));
+        }
+    }
+
+    // Comment residue: compiler banners survive in .comment.
+    if let Some(comment) = &info.comment {
+        for tok in comment_tokens(comment) {
+            ef.bump(format!("cmt:{tok}"));
+        }
+    }
+
+    Ok(ef)
+}
+
+fn labels_from(info: &ElfInfo) -> Labels {
+    let l = &info.labels;
+    Labels {
+        compiler_family: l.compiler_family.clone(),
+        compiler_version: l.compiler_version.clone(),
+        opt_level: l.opt_level.clone(),
+        arch: l.arch.clone(),
+        os: l.os.clone(),
+        abi: l.abi.clone(),
+        pie: l.pie.clone(),
+        lto: l.lto.clone(),
+        static_linking: l.static_linking.clone(),
+    }
+}
+
+/// Mnemonic, register, and immediate counts from one 64-byte window, or
+/// `None` if the window does not disassemble cleanly.
+#[derive(Debug, Default, Clone)]
+pub struct WindowStats {
+    pub mnemonics: Vec<String>,
+    pub registers: Vec<String>,
+    pub immediates: Vec<u32>,
+}
+
+pub fn disassemble_window(decoder: &InstDecoder, window: &[u8]) -> Option<WindowStats> {
+    let mut stats = WindowStats::default();
+    let mut off = 0usize;
+    let mut budget = window.len(); // one instruction consumes at least one byte
+    while off < window.len() {
+        if budget == 0 {
+            return None; // pathological: more instructions than bytes
+        }
+        match decoder.decode_slice(&window[off..]) {
+            Ok(inst) => {
+                let len = LengthedInstruction::len(&inst).to_const() as usize;
+                if len == 0 || len > window.len() - off {
+                    return None;
+                }
+                stats.mnemonics.push(inst.opcode().to_string());
+                collect_operands(&inst, &mut stats);
+                off += len;
+            }
+            Err(_) => return None,
+        }
+        budget -= 1;
+    }
+    Some(stats)
+}
+
+fn collect_operands(inst: &yaxpeax_x86::long_mode::Instruction, stats: &mut WindowStats) {
+    for i in 0..inst.operand_count() {
+        match inst.operand(i) {
+            Operand::ImmediateI8 { imm } => push_imm(stats, imm as i64),
+            Operand::ImmediateU8 { imm } => push_imm(stats, imm as i64),
+            Operand::ImmediateI16 { imm } => push_imm(stats, imm as i64),
+            Operand::ImmediateU16 { imm } => push_imm(stats, imm as i64),
+            Operand::ImmediateI32 { imm } => push_imm(stats, imm as i64),
+            Operand::ImmediateU32 { imm } => push_imm(stats, imm as i64),
+            Operand::ImmediateI64 { imm } => push_imm(stats, imm),
+            Operand::ImmediateU64 { imm } => push_imm(stats, imm as i64),
+            other => collect_registers(&other, stats),
+        }
+    }
+}
+
+fn push_imm(stats: &mut WindowStats, value: i64) {
+    stats.immediates.push((value & 0xffff_ffff) as u32);
+}
+
+/// Register names referenced anywhere in an operand, including memory
+/// operand base/index registers and AVX-512 mask registers.
+fn collect_registers(op: &Operand, stats: &mut WindowStats) {
+    use Operand::*;
+    match op {
+        Register { reg } => push_reg(stats, reg.name()),
+        RegisterMaskMerge { reg, mask, .. } => {
+            push_reg(stats, reg.name());
+            push_reg(stats, mask.name());
+        }
+        RegisterMaskMergeSae { reg, mask, .. } => {
+            push_reg(stats, reg.name());
+            push_reg(stats, mask.name());
+        }
+        RegisterMaskMergeSaeNoround { reg, mask, .. } => {
+            push_reg(stats, reg.name());
+            push_reg(stats, mask.name());
+        }
+        MemDeref { base } => push_reg(stats, base.name()),
+        Disp { base, .. } => push_reg(stats, base.name()),
+        MemIndexScale { index, .. } => push_reg(stats, index.name()),
+        MemIndexScaleDisp { index, .. } => push_reg(stats, index.name()),
+        MemBaseIndexScale { base, index, .. } => {
+            push_reg(stats, base.name());
+            push_reg(stats, index.name());
+        }
+        MemBaseIndexScaleDisp { base, index, .. } => {
+            push_reg(stats, base.name());
+            push_reg(stats, index.name());
+        }
+        MemDerefMasked { base, mask } => {
+            push_reg(stats, base.name());
+            push_reg(stats, mask.name());
+        }
+        DispMasked { base, mask, .. } => {
+            push_reg(stats, base.name());
+            push_reg(stats, mask.name());
+        }
+        MemIndexScaleMasked { index, mask, .. } => {
+            push_reg(stats, index.name());
+            push_reg(stats, mask.name());
+        }
+        MemIndexScaleDispMasked { index, mask, .. } => {
+            push_reg(stats, index.name());
+            push_reg(stats, mask.name());
+        }
+        MemBaseIndexScaleMasked {
+            base, index, mask, ..
+        } => {
+            push_reg(stats, base.name());
+            push_reg(stats, index.name());
+            push_reg(stats, mask.name());
+        }
+        MemBaseIndexScaleDispMasked {
+            base, index, mask, ..
+        } => {
+            push_reg(stats, base.name());
+            push_reg(stats, index.name());
+            push_reg(stats, mask.name());
+        }
+        _ => {}
+    }
+}
+
+fn push_reg(stats: &mut WindowStats, name: &'static str) {
+    stats.registers.push(name.to_string());
+}
+
+/// floor(log2(size)); 0 maps to 0.
+pub fn log2_size(size: u64) -> u64 {
+    if size <= 1 {
+        0
+    } else {
+        (size as f64).log2().floor() as u64
+    }
+}
+
+/// Shannon entropy of a byte sequence in bits/byte (0.0 ..= 8.0).
+pub fn shannon_entropy(bytes: &[u8]) -> f64 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut hist = [0u64; 256];
+    for &b in bytes {
+        hist[b as usize] += 1;
+    }
+    let n = bytes.len() as f64;
+    hist.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+/// floor(shannon_entropy) clamped to 0..=8.
+pub fn entropy_bucket(bytes: &[u8]) -> u64 {
+    let e = shannon_entropy(bytes);
+    (e.floor().clamp(0.0, 8.0)) as u64
+}
+
+/// Lowercase tokens of length >= 3 from a `.comment` blob (NUL/whitespace
+/// separated). Compilers leave banners here that survive stripping.
+pub fn comment_tokens(comment: &[u8]) -> Vec<String> {
+    let s = String::from_utf8_lossy(comment);
+    s.split(['\0', '\n', '\r', '\t', ' '])
+        .filter(|t| t.len() >= 3)
+        .map(|t| t.to_ascii_lowercase())
+        .collect()
+}
+
+/// Cosine similarity between two feature vectors. Two empty (or one empty)
+/// vectors have similarity 0.0 by definition here.
+pub fn cosine(a: &BTreeMap<String, u64>, b: &BTreeMap<String, u64>) -> f64 {
+    let norm_a = a.values().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let norm_b = b.values().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    let dot = a
+        .iter()
+        .filter_map(|(k, va)| b.get(k).map(|vb| (*va as f64) * (*vb as f64)))
+        .sum::<f64>();
+    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
+}
