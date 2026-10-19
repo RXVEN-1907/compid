@@ -98,7 +98,7 @@ rerunning continues where it stopped. `--jobs N` controls parallelism
 ## Adding a toolchain or target
 
 1. Make the compiler reachable and teach `toolchains.py` to find it:
-   either drop zig under `/tmp/compid-toolchains/zig` (or point
+   either drop zig under `~/.cache/compid/toolchains/zig` (or point
    `COMPID_ZIG` at it) for clang-family builds, or extend `discover()`
    with a new native toolchain.
 2. If it is a zig-cc target, add the triple to `ZIG_TARGETS` in
@@ -116,9 +116,10 @@ toolchain only needs C11/C++17 plus libc, libm and libstdc++.
 
 gcc/g++ 13.3.0 came with the system. Docker is not usable here (the
 docker socket is permission-blocked and there is no root), so the second
-toolchain is a userspace zig install:
+toolchain is a userspace zig install under the cache directory - a private,
+owner-checked location rather than shared /tmp:
 
-    mkdir -p /tmp/compid-toolchains && cd /tmp/compid-toolchains
+    mkdir -p ~/.cache/compid/toolchains && cd ~/.cache/compid/toolchains
     curl -LO https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
     tar xf zig-x86_64-linux-0.14.1.tar.xz
     mv zig-x86_64-linux-0.14.1 zig

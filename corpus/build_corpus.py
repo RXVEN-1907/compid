@@ -32,13 +32,15 @@ import concurrent.futures
 import csv
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from toolchains import discover, by_name  # noqa: E402
+from toolchains import discover, by_name, is_trusted  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 SOURCES_DIR = REPO / "corpus" / "sources"
@@ -230,8 +232,10 @@ def warmup(toolchains, jobs):
     are distinct cache entries and warm safely in a small pool.
     """
     tcs = by_name(toolchains)
-    warm_dir = Path("/tmp/compid-warmup")
-    warm_dir.mkdir(parents=True, exist_ok=True)
+    # Private per-run scratch area (mode 0700, random name): warmup sources and
+    # outputs are only ever written by and read by this process, and a hostile
+    # pre-existing /tmp path can neither be followed into nor injected into.
+    warm_dir = Path(tempfile.mkdtemp(prefix="compid-warmup-"))
     src = warm_dir / "warm.c"
     src.write_text('#include <stdio.h>\nint main(void){printf("warm\\n");return 0;}\n')
     srccxx = warm_dir / "warm.cpp"
@@ -255,6 +259,7 @@ def warmup(toolchains, jobs):
         flavors[key] = cmd
 
     if not flavors:
+        shutil.rmtree(warm_dir, ignore_errors=True)
         return
     print(f"warming {len(flavors)} zig cache flavors (parallel, patient timeout)...")
     t0 = time.time()
@@ -269,6 +274,7 @@ def warmup(toolchains, jobs):
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(once, flavors.values()))
     print(f"  warmup done in {time.time() - t0:.1f}s")
+    shutil.rmtree(warm_dir, ignore_errors=True)
 
 
 def run_job(job):
@@ -276,6 +282,8 @@ def run_job(job):
     out_path = job["out_path"]
     if out_path.exists() and out_path.stat().st_size > 0:
         return "skip", job, "already built", ""
+    if not is_trusted(job["cmd"][0]):
+        return "fail", job, "toolchain binary failed trust re-check", ""
     try:
         proc = subprocess.run(
             job["cmd"],
