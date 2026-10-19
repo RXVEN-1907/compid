@@ -71,7 +71,7 @@ pub fn load(path: &Path) -> Result<ElfInfo> {
     let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
     if data.len() < 4 || &data[0..4] != b"\x7fELF" {
         bail!(
-            "{} is not an ELF file (missing \\x7fELF magic); compid only reads ELF",
+            "{} is not an ELF file (missing \\x7fELF magic); the ELF reader needs ELF bytes",
             path.display()
         );
     }

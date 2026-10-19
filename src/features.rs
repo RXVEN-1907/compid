@@ -1,5 +1,5 @@
-//! Feature extraction: turn an [`ElfInfo`] into the tf feature map the
-//! trainer and the classifier share.
+//! Feature extraction: turn parsed binary material ([`ElfInfo`] or
+//! [`PeInfo`]) into the tf feature map the trainer and the classifier share.
 //!
 //! Feature keys, exactly as the project contract defines them:
 //!
@@ -12,7 +12,7 @@
 //! | `sec:<s>` | floor(log2(section size)) for each named section |
 //! | `ent:<s>` | Shannon-entropy bucket 0..=8 of each section's bytes |
 //! | `meta:windows` | number of cleanly disassembling 64-byte windows |
-//! | `cmt:<tok>` | tokens from the `.comment` section |
+//! | `cmt:<tok>` | tokens from the `.comment` section; import-table DLL names on PE |
 //!
 //! Disassembly windows are consecutive non-overlapping 64-byte chunks of
 //! `.text`. A window "disassembles cleanly" when decoding from its first
@@ -25,7 +25,8 @@
 //! All counts are raw integers; L2 normalization happens at train and infer
 //! time, never in the stored JSON.
 
-use crate::elfinfo::ElfInfo;
+use crate::elfinfo::{ElfInfo, SectionInfo};
+use crate::peinfo::PeInfo;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -72,6 +73,79 @@ impl ExtractedFeatures {
     }
 }
 
+/// Borrowed, format-agnostic material one extraction pass consumes. Both
+/// [`ElfInfo`] and [`PeInfo`] project onto this, so the loop below is the
+/// single place n-grams, windows, geometry, and tokens are counted - which
+/// is what keeps the ELF and PE feature schemas byte-for-byte identical.
+struct Source<'a> {
+    labels: Labels,
+    build_id: &'a str,
+    text: &'a [u8],
+    sections: &'a [SectionInfo],
+    section_bytes: &'a dyn Fn(usize, u64) -> Vec<u8>,
+    /// Residue tokens counted as `cmt:` features: `.comment` banners on
+    /// ELF, import-table DLL names on PE.
+    tokens: Vec<String>,
+    /// Run x86-64 long-mode disassembly over `text`. False skips the
+    /// mnemonic/register/immediate features (and leaves `meta:windows`
+    /// at 0) for code bytes this decoder cannot read, e.g. an aarch64 PE.
+    disassemble: bool,
+}
+
+/// The shared core: n-grams, windowed disassembly, section geometry and
+/// entropy, residue tokens. Infallible; the per-format wrappers own the
+/// "is there a .text at all" checks.
+fn extract_source(src: Source) -> ExtractedFeatures {
+    let mut ef = ExtractedFeatures::new(src.build_id.to_string(), src.labels);
+
+    // Byte 3-grams over the whole .text, one byte at a time.
+    for gram in src.text.windows(3) {
+        let key = format!("ng:{:02x}{:02x}{:02x}", gram[0], gram[1], gram[2]);
+        ef.bump(key);
+    }
+
+    // Windowed disassembly.
+    let decoder = InstDecoder::default();
+    let mut windows = 0u64;
+    if src.disassemble {
+        for window in src.text.chunks_exact(WINDOW_SIZE) {
+            if let Some(stats) = disassemble_window(&decoder, window) {
+                windows += 1;
+                for m in &stats.mnemonics {
+                    ef.bump(format!("mn:{m}"));
+                }
+                for r in &stats.registers {
+                    ef.bump(format!("rg:{r}"));
+                }
+                for imm in &stats.immediates {
+                    ef.bump(format!("cn:{imm:x}"));
+                }
+            }
+        }
+    }
+    ef.features.insert("meta:windows".to_string(), windows);
+
+    // Section geometry and byte entropy.
+    for s in src.sections {
+        if s.size > 0 {
+            ef.features
+                .insert(format!("sec:{}", s.name), log2_size(s.size));
+        }
+        if !s.no_bits && s.size > 0 {
+            let bytes = (src.section_bytes)(s.offset, s.size);
+            ef.features
+                .insert(format!("ent:{}", s.name), entropy_bucket(&bytes));
+        }
+    }
+
+    // Residue tokens: compiler banners, import DLL names.
+    for tok in &src.tokens {
+        ef.bump(format!("cmt:{tok}"));
+    }
+
+    ef
+}
+
 /// Extract the full feature map from parsed ELF material.
 pub fn extract(info: &ElfInfo) -> Result<ExtractedFeatures> {
     let text = match &info.text {
@@ -83,54 +157,59 @@ pub fn extract(info: &ElfInfo) -> Result<ExtractedFeatures> {
         ),
     };
 
-    let mut ef = ExtractedFeatures::new(info.build_id.clone(), labels_from(info));
+    Ok(extract_source(Source {
+        labels: labels_from(info),
+        build_id: &info.build_id,
+        text,
+        sections: &info.sections,
+        section_bytes: &|offset, size| info.section_data(offset, size),
+        tokens: info
+            .comment
+            .as_deref()
+            .map(comment_tokens)
+            .unwrap_or_default(),
+        disassemble: true,
+    }))
+}
 
-    // Byte 3-grams over the whole .text, one byte at a time.
-    for gram in text.windows(3) {
-        let key = format!("ng:{:02x}{:02x}{:02x}", gram[0], gram[1], gram[2]);
-        ef.bump(key);
-    }
+/// Extract the full feature map from parsed PE material. Import-table DLL
+/// names share the `cmt:` namespace - they are the strongest OS/libc signal
+/// a Windows binary carries. A non-x86-64 PE (none in the seed today)
+/// yields the byte-level features only, with `meta:windows` at 0.
+pub fn extract_pe(info: &PeInfo) -> Result<ExtractedFeatures> {
+    let text = match &info.text {
+        Some(t) if !t.is_empty() => t,
+        Some(_) => bail!("binary has an empty .text section; nothing to fingerprint"),
+        None => bail!(
+            "binary has no readable .text section (section absent or raw size zero); \
+             compid needs PE section headers to find executable bytes"
+        ),
+    };
 
-    // Windowed disassembly.
-    let decoder = InstDecoder::default();
-    let mut windows = 0u64;
-    for window in text.chunks_exact(WINDOW_SIZE) {
-        if let Some(stats) = disassemble_window(&decoder, window) {
-            windows += 1;
-            for m in &stats.mnemonics {
-                ef.bump(format!("mn:{m}"));
-            }
-            for r in &stats.registers {
-                ef.bump(format!("rg:{r}"));
-            }
-            for imm in &stats.immediates {
-                ef.bump(format!("cn:{imm:x}"));
-            }
-        }
-    }
-    ef.features.insert("meta:windows".to_string(), windows);
-
-    // Section geometry and byte entropy.
-    for s in &info.sections {
-        if s.size > 0 {
-            ef.features
-                .insert(format!("sec:{}", s.name), log2_size(s.size));
-        }
-        if !s.no_bits && s.size > 0 {
-            let bytes = info.section_data(s.offset, s.size);
-            ef.features
-                .insert(format!("ent:{}", s.name), entropy_bucket(&bytes));
-        }
-    }
-
-    // Comment residue: compiler banners survive in .comment.
-    if let Some(comment) = &info.comment {
-        for tok in comment_tokens(comment) {
-            ef.bump(format!("cmt:{tok}"));
-        }
-    }
-
-    Ok(ef)
+    let l = &info.labels;
+    Ok(extract_source(Source {
+        labels: Labels {
+            compiler_family: l.compiler_family.clone(),
+            compiler_version: l.compiler_version.clone(),
+            opt_level: l.opt_level.clone(),
+            arch: l.arch.clone(),
+            os: l.os.clone(),
+            abi: l.abi.clone(),
+            pie: l.pie.clone(),
+            lto: l.lto.clone(),
+            static_linking: l.static_linking.clone(),
+        },
+        build_id: &info.build_id,
+        text,
+        sections: &info.sections,
+        section_bytes: &|offset, size| info.section_data(offset, size),
+        tokens: info
+            .libraries
+            .iter()
+            .map(|lib| lib.to_ascii_lowercase())
+            .collect(),
+        disassemble: info.disassembles_x86_64(),
+    }))
 }
 
 fn labels_from(info: &ElfInfo) -> Labels {

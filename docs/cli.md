@@ -1,8 +1,9 @@
 # CLI reference
 
-compid ships as one binary with six subcommands. `compid --help` and
-`compid <subcommand> --help` describe the exact CLI of the installed build;
-this page explains the shape and the defaults behind them.
+compid ships as one binary with six subcommands plus a hidden completions
+helper. `compid --help` and `compid <subcommand> --help` describe the exact
+CLI of the installed build; this page explains the shape and the defaults
+behind them.
 
 ```text
 compid [--version] [--help] <subcommand> [args]
@@ -24,6 +25,13 @@ Prints the feature JSON for one binary to stdout, or writes it to `out.json`
 with `-o`. The JSON follows the schema in `docs/dataset.md`: `build_id` and
 `labels` are empty strings for binaries outside the corpus, and `features`
 holds the integer counts over `.text`.
+
+Both ELF and PE (Windows, x86-64) binaries extract through this one
+command; the container is detected from the file's magic bytes. PE output
+carries `os=windows`, the architecture spelled from the COFF machine
+(`x86_64`), and the manifest's windows-row conventions for the fields a PE
+does not express (`pie`/`static` = `n/a`); the import table's DLL names
+appear as lowercase `cmt:` features.
 
 ## compid classify
 
@@ -49,6 +57,11 @@ opt_level         O2             0.64
 `--json` swaps the table for a machine-readable object: one entry per field,
 each a map of class name to probability. Consumers should ignore unknown
 fields; the schemas version themselves (`format`, `feature_version`).
+
+PE binaries classify through the same command. A field the loaded model
+does not know (say, `os` before a retrain on windows rows) is simply
+absent from the output - the extractor reports what it sees, the model
+answers only what it was trained on.
 
 ## compid explain
 
@@ -96,6 +109,30 @@ are emitted as JSON lines - one per binary - to stdout, or appended to
 `FILE` with `--out`. Rows whose binary is missing are skipped and summarized
 in a final line, so a partial local checkout still processes everything
 present.
+
+## compid completions
+
+```text
+compid completions <shell>
+```
+
+Prints a shell completion script to stdout for one of `bash`, `zsh`,
+`fish`, or `powershell` - no flags, just the script. The subcommand is
+hidden from `--help` because it is a one-time install helper, not a daily
+driver. Install the script where your shell looks for completions:
+
+- bash: `compid completions bash > ~/.local/share/bash-completion/completions/compid`
+  (create the directory first if it does not exist; the completion loads
+  on the next interactive shell)
+- zsh: `compid completions zsh > ~/.zfunc/_compid` and make sure
+  `~/.zfunc` is in your `fpath` before `compinit` runs
+- fish: `compid completions fish > ~/.config/fish/completions/compid.fish`
+- PowerShell: `compid completions powershell >> $PROFILE` (or dot-source
+  the output from your profile)
+
+The generated script covers the subcommands and flags of the build that
+produced it, so regenerate it after upgrading compid. Unknown shell names
+are rejected with a usage error (exit code 2) listing the supported ones.
 
 ## Exit codes
 

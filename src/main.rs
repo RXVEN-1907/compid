@@ -1,6 +1,6 @@
 //! compid - binary provenance classifier.
 //!
-//! One binary, six subcommands:
+//! One binary, six subcommands plus a hidden completions helper:
 //!
 //! - `extract <BIN>`: print the feature JSON for one binary
 //! - `classify <BIN>`: predict provenance labels with a trained model
@@ -8,10 +8,11 @@
 //! - `compare <A> <B>`: cosine similarity between two feature vectors
 //! - `dataset-info`: label distributions from a manifest CSV
 //! - `batch <MANIFEST>`: extract features for every listed binary
+//! - `completions <SHELL>`: print a shell completion script (hidden)
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
-use compid::{elfinfo, features, manifest, model, report};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use compid::{extract_binary, features, manifest, model, report};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,11 +22,11 @@ use std::path::{Path, PathBuf};
     name = "compid",
     version,
     about = "Binary provenance classifier - which compiler built this binary?",
-    long_about = "compid fingerprints (possibly stripped) ELF binaries and predicts \
-                  provenance labels - compiler family, optimization level, architecture, \
-                  OS, libc, PIE, LTO, linkage - with confidence scores. Predictions come \
-                  from a model the training pipeline produces; the extractor also works \
-                  standalone to dump raw features."
+    long_about = "compid fingerprints (possibly stripped) ELF and PE (x86-64) binaries \
+                  and predicts provenance labels - compiler family, optimization level, \
+                  architecture, OS, libc, PIE, LTO, linkage - with confidence scores. \
+                  Predictions come from a model the training pipeline produces; the \
+                  extractor also works standalone to dump raw features."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -36,7 +37,7 @@ struct Cli {
 enum Cmd {
     /// Print (or write) the feature JSON for one binary
     Extract {
-        /// Path to the ELF binary
+        /// Path to the ELF or PE binary
         bin: PathBuf,
         /// Write the JSON to this file instead of stdout
         #[arg(short, long, value_name = "FILE")]
@@ -44,7 +45,7 @@ enum Cmd {
     },
     /// Predict provenance labels with a trained model
     Classify {
-        /// Path to the ELF binary
+        /// Path to the ELF or PE binary
         bin: PathBuf,
         /// Trained model file
         #[arg(long, value_name = "FILE", default_value = "model/model.json")]
@@ -55,7 +56,7 @@ enum Cmd {
     },
     /// Show which features drive each predicted label
     Explain {
-        /// Path to the ELF binary
+        /// Path to the ELF or PE binary
         bin: PathBuf,
         /// Trained model file
         #[arg(long, value_name = "FILE", default_value = "model/model.json")]
@@ -66,9 +67,9 @@ enum Cmd {
     },
     /// Cosine similarity between two binaries' feature vectors
     Compare {
-        /// First ELF binary
+        /// First ELF or PE binary
         a: PathBuf,
-        /// Second ELF binary
+        /// Second ELF or PE binary
         b: PathBuf,
     },
     /// Summarize label distributions from a manifest CSV
@@ -85,6 +86,25 @@ enum Cmd {
         #[arg(short, long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
+    /// Print a shell completion script to stdout (hidden from --help)
+    #[command(hide = true)]
+    Completions {
+        /// Shell to generate the completion script for
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+}
+
+/// The shells `compid completions` writes scripts for, in the order they are
+/// offered on the command line.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+    /// Windows PowerShell
+    #[value(name = "powershell")]
+    PowerShell,
 }
 
 fn main() {
@@ -103,13 +123,25 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Compare { a, b } => cmd_compare(&a, &b),
         Cmd::DatasetInfo { manifest } => cmd_dataset_info(&manifest),
         Cmd::Batch { manifest, out } => cmd_batch(&manifest, out.as_deref()),
+        Cmd::Completions { shell } => cmd_completions(shell),
     }
 }
 
-/// Parse + extract in one step, with the binary path in every error.
-fn extract_binary(bin: &Path) -> Result<features::ExtractedFeatures> {
-    let info = elfinfo::load(bin)?;
-    features::extract(&info)
+/// Write the completion script for one shell to stdout. The script covers
+/// the subcommands and flags of the build that generated it.
+fn cmd_completions(shell: CompletionShell) -> Result<()> {
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_owned();
+    let generator = match shell {
+        CompletionShell::Bash => clap_complete::shells::Shell::Bash,
+        CompletionShell::Zsh => clap_complete::shells::Shell::Zsh,
+        CompletionShell::Fish => clap_complete::shells::Shell::Fish,
+        CompletionShell::PowerShell => clap_complete::shells::Shell::PowerShell,
+    };
+    let mut out = std::io::stdout().lock();
+    clap_complete::generate(generator, &mut cmd, name, &mut out);
+    out.flush().context("write failed")?;
+    Ok(())
 }
 
 fn cmd_extract(bin: &Path, out: Option<&Path>) -> Result<()> {

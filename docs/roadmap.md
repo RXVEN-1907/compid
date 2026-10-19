@@ -5,21 +5,24 @@ Items are ordered roughly by how much capability they add per unit of work.
 
 ## Next
 
-### PE and Mach-O support
+### Mach-O support
 
-The feature schema barely cares about the container. `mn:`, `rg:`, `ng:`,
-`cn:`, and `meta:windows` come from the code bytes and work unchanged;
-`sec:`, `ent:`, and `cmt:` map onto PE sections and COFF comment records, and
-Mach-O sections and notes, with small extraction changes. Labels gain
-`windows` and `macos` values for `os`. The zig cross-targets can already
-produce PE seed binaries, so the corpus side is ready before the parser is.
+Windows PE support is done as of this round: the extractor maps `sec:`
+and `ent:` onto PE sections, counts import-table DLL names as `cmt:`
+features, and disassembles the x86-64 `.text` with the same window scheme,
+so the corpus's windows builds produce features and train alongside the
+ELF ones. That leaves Mach-O. The mapping is the same shape - Mach-O
+sections and note records, with small extraction changes - and `os` gains
+a `macos` value once the matrix can seed it.
 
 ### More architectures
 
-riscv64 and arm32 alongside x86-64 and aarch64. The yaxpeax family has
-decoders for both, so the work is wiring, not research. Cross-builds via the
-existing zig toolchain multiply the matrix the day the decoder lands.
-aarch64 is already reachable as a seed target; riscv64 and arm32 are next.
+riscv64 and arm32 are done as of this round: the matrix now covers x86-64,
+aarch64, riscv64, and arm32, cross-built through the existing zig
+toolchain (riscv64-linux-gnu, riscv64-linux-musl, arm-linux-musleabihf
+seed targets). Further architectures follow the same wiring pattern - the
+yaxpeax family has decoders for them - so the next ISA is a matter of
+demand, not research.
 
 ### Function-level classification
 
@@ -32,10 +35,14 @@ mixed toolchains and vendored libraries.
 
 ### Ghidra and IDA plugins
 
-`model.json` is a static file with a documented format, so plugins can load
-it directly - no server, no reimplementation of training, just inference
-against the model the repo ships (or a local retrained one). Surface
-per-field predictions and the explain view in the disassembler UI.
+The Ghidra side starts this round: `ghidra_scripts/compid_classify.py`
+classifies the program under analysis and appends the per-field predictions
+to a listing plate comment. Still ahead is deeper Ghidra integration -
+per-function predictions and the explain view surfaced in the disassembler
+UI - and the IDA equivalent. `model.json` is a static file with a
+documented format, so plugins can load it directly - no server, no
+reimplementation of training, just inference against the model the repo
+ships (or a local retrained one).
 
 ### Online model updates
 

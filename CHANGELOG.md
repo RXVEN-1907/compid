@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Windows PE (x86-64) support in extraction and classification: `compid
+  extract`, `classify`, `explain`, `compare`, and `batch` detect the
+  container from the file's magic bytes. PE binaries report `os=windows`
+  and the COFF-machine architecture (`x86_64`), their import-table DLL
+  names feed the `cmt:` feature namespace, and the windows rows the corpus
+  already records (previously skipped at extraction time) now produce
+  features and join training.
+- `compid completions <shell>` - shell completion scripts for bash, zsh,
+  fish, and PowerShell, printed to stdout for the caller's shell; install
+  locations are documented in `docs/cli.md`.
+- Ghidra script (`ghidra_scripts/compid_classify.py`) that classifies the
+  program under analysis with `compid classify`, appends the per-field
+  predictions to a listing plate comment, and prints the full table to the
+  script console.
+- riscv64 and arm32 matrix axes - the corpus builder, manifest, and model
+  now cover riscv64 and arm32 alongside x86-64 and aarch64.
+
+### Security
+
+- Hardened the corpus builder's toolchain lookup and warmup scratch
+  directory: toolchain binaries are trust-checked for ownership and
+  writability (resolved through symlinks) immediately before every
+  execution, and the serial cache warmup compiles in a private per-run
+  directory instead of a predictable path under `/tmp`.
+
 ## [0.1.0] - 2026-10-20
 
 ### Added

@@ -11,7 +11,7 @@ matters (corpus building and training).
 ```mermaid
 flowchart LR
     S["Seed sources<br/>small C and C++ programs"] --> B["Build matrix<br/>toolchain x -O level x PIE x LTO x linking x libc"]
-    B --> BIN["ELF binaries<br/>dataset/binaries (local only)"]
+    B --> BIN["ELF and PE binaries<br/>dataset/binaries (local only)"]
     BIN --> X["compid extract<br/>goblin + yaxpeax-x86"]
     X --> F["Feature JSON per binary<br/>ng: mn: rg: cn: sec: ent: meta: cmt:"]
     F --> MF["dataset/manifest.csv<br/>ground-truth labels + sha256"]
@@ -39,9 +39,11 @@ the same tooling (see `docs/dataset.md`).
 
 ## Stage 2 - extraction
 
-`compid extract` (Rust) reads the ELF with [goblin](https://docs.rs/goblin)
-and disassembles `.text` with [yaxpeax-x86](https://docs.rs/yaxpeax-x86),
-emitting one JSON object of integer counts per binary. The feature families:
+`compid extract` (Rust) reads the ELF - or the PE - with
+[goblin](https://docs.rs/goblin) and disassembles `.text` with
+[yaxpeax-x86](https://docs.rs/yaxpeax-x86), emitting one JSON object of
+integer counts per binary. The container is detected from the file's magic
+bytes; the feature families below come out of either format unchanged:
 
 | prefix         | feature                                          | why it separates builds                                                              |
 |----------------|--------------------------------------------------|--------------------------------------------------------------------------------------|
@@ -52,7 +54,15 @@ emitting one JSON object of integer counts per binary. The feature families:
 | `sec:`         | log2 of each section's size                      | section layout follows the linker and the flags                                      |
 | `ent:`         | per-section entropy, integer 0-8                 | plain code, high-entropy data, or compressed content are easy to tell apart          |
 | `meta:windows` | 64-byte sliding windows that disassemble cleanly | aligned, compiler-emitted code disassembles cleanly; packed or mixed content does not |
-| `cmt:`         | tokens from comment and note string sections     | `.comment` often names the compiler and version outright                             |
+| `cmt:`         | tokens from comment and note string sections; on PE, import-table DLL names | `.comment` often names the compiler and version outright; imports name the OS runtimes a Windows binary touches |
+
+PE (Windows, x86-64 today) rides the same pipeline: the same feature
+families come out of the PE `.text` section, and the import table's DLL
+names are counted as `cmt:` tokens - the strongest OS/libc signal a Windows
+binary carries. Labels follow the manifest's windows-row conventions
+(`os=windows`, the COFF machine spelling `x86_64`, `pie`/`static` = `n/a`),
+and a non-x86-64 PE, if one ever appears, skips the disassembly features
+rather than counting garbage.
 
 Counts are integer tf values over the `.text` section. The JSON holds no
 normalized numbers: L2 normalization happens at train time and at infer time,
@@ -68,7 +78,7 @@ One label field per question, all recorded at build time:
 | `compiler_version` | which version of it            | `13.3.0`, `19.1.5`, ...        |
 | `opt_level`        | optimization level             | `O0`, `O1`, `O2`, `O3`, `Os`  |
 | `arch`             | target architecture            | `x86-64`, `aarch64`            |
-| `os`               | target OS                      | `linux`                        |
+| `os`               | target OS                      | `linux`, `windows`             |
 | `abi`              | libc / ABI flavor              | `gnu`, `musl`                  |
 | `pie`              | position-independent?          | `yes`, `no`                    |
 | `lto`              | link-time optimized?           | `yes`, `no`                    |
