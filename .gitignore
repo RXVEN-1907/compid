@@ -1,0 +1,11 @@
+# Rust build artifacts
+target/
+
+# Corpus binaries stay local; the manifest and extracted features are committed
+# (features ship gzipped - the raw jsonl is a regeneration artifact)
+dataset/binaries/
+dataset/features/train.jsonl
+
+# Python virtual environments and caches
+.venv/
+__pycache__/

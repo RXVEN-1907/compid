@@ -1,0 +1,4 @@
+# Keep this file minimal and stable-only so `cargo fmt --all -- --check`
+# behaves identically on every contributor's and CI's toolchain.
+edition = "2021"
+max_width = 100

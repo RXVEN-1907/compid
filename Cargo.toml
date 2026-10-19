@@ -1,0 +1,24 @@
+[package]
+name = "compid"
+version = "0.1.0"
+edition = "2021"
+authors = ["RXVEN-1907"]
+description = "Binary provenance classifier - which compiler built this binary?"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/RXVEN-1907/compid"
+readme = "README.md"
+keywords = ["binary-analysis", "provenance", "elf", "compiler-detection", "security"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+goblin = "0.10.7"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+yaxpeax-arch = "0.3.3"
+yaxpeax-x86 = "2.2.0"
+
+[profile.release]
+lto = true
+strip = true
