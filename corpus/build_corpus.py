@@ -5,7 +5,8 @@ The matrix covers the axes compid predicts:
 
   toolchain   gcc13 (system gcc/g++) and zig-cc (clang 19 via zig)
   target      x86_64-linux-gnu, x86_64-linux-musl (zig), aarch64-linux-gnu
-              (zig), x86_64-windows-gnu (zig)
+              (zig), riscv64-linux-gnu, riscv64-linux-musl,
+              arm-linux-musleabihf (zig), x86_64-windows-gnu (zig)
   opt         O0 O1 O2 O3 Os, plus Oz for zig
   pie         explicit -pie / -no-pie (native gcc glibc builds only)
   lto         -flto on/off (gcc, linux only)
@@ -68,8 +69,14 @@ CXX_OPTS = ["O0", "O2", "Os"]
 ZIG_GNU_OPTS = ["O0", "O2", "Oz"]
 ZIG_MUSL_OPTS = ["O0", "O2"]
 ZIG_AARCH64_OPTS = ["O0", "O2"]
+ZIG_RISCV64_OPTS = ["O0", "O2"]
+ZIG_ARMHF_OPTS = ["O0", "O2"]
 ZIG_WINDOWS_OPTS = ["O0", "O2"]
 ZIG_CXX_OPTS = ["O0", "O2"]
+# How many of the sorted C++ sources (which all compile clean for the new
+# targets) join the cross matrix; the rest stay x86_64-only to keep the
+# matrix from exploding.
+ZIG_CXX_CROSS = 2
 
 WARN_FLAGS = ["-w"]
 MATH_FLAGS = ["-lm"]
@@ -127,6 +134,12 @@ def source_files():
 def target_labels(target):
     arch, rest = target.split("-", 1)
     osname, abi = rest.split("-", 1)
+    # The abi label is the libc family, gnu or musl. Triple suffixes that
+    # only refine it (musleabi, musleabihf) fold into musl so the column
+    # stays comparable across targets; the exact triple is preserved in the
+    # build_id and the toolchain target list.
+    if abi.startswith("musl"):
+        abi = "musl"
     return arch, osname, abi
 
 
@@ -212,11 +225,25 @@ def build_plan(toolchains):
                 add("zig-cc", "x86_64-linux-musl", opt, "default", "off", "static", path, "c")
             for opt in ZIG_AARCH64_OPTS:
                 add("zig-cc", "aarch64-linux-gnu", opt, "default", "off", "dyn", path, "c")
+            for opt in ZIG_RISCV64_OPTS:
+                add("zig-cc", "riscv64-linux-gnu", opt, "default", "off", "dyn", path, "c")
+            for opt in ZIG_MUSL_OPTS:
+                add("zig-cc", "riscv64-linux-musl", opt, "default", "off", "static", path, "c")
+            for opt in ZIG_ARMHF_OPTS:
+                add("zig-cc", "arm-linux-musleabihf", opt, "default", "off", "static", path, "c")
             for opt in ZIG_WINDOWS_OPTS:
                 add("zig-cc", "x86_64-windows-gnu", opt, "default", "off", "dyn", path, "c")
-        for sid, path, lang in cxx_srcs:
+        for i, (sid, path, lang) in enumerate(cxx_srcs):
             for opt in ZIG_CXX_OPTS:
                 add("zig-cc", "x86_64-linux-gnu", opt, "default", "off", "dyn", path, lang)
+            if i < ZIG_CXX_CROSS:
+                for target, opts, static in (
+                    ("riscv64-linux-gnu", ZIG_RISCV64_OPTS, "dyn"),
+                    ("riscv64-linux-musl", ZIG_MUSL_OPTS, "static"),
+                    ("arm-linux-musleabihf", ZIG_ARMHF_OPTS, "static"),
+                ):
+                    for opt in opts:
+                        add("zig-cc", target, opt, "default", "off", static, path, lang)
 
     jobs.sort(key=lambda j: j["build_id"])
     return jobs
@@ -285,8 +312,12 @@ def run_job(job):
     if not is_trusted(job["cmd"][0]):
         return "fail", job, "toolchain binary failed trust re-check", ""
     try:
+        # Execute the realpath-resolved binary: the validated path and the
+        # executed path are then the same file, closing the symlink gap.
+        cmd = list(job["cmd"])
+        cmd[0] = os.path.realpath(cmd[0])
         proc = subprocess.run(
-            job["cmd"],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             timeout=BUILD_TIMEOUT,

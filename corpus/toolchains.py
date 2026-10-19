@@ -7,7 +7,8 @@ exactly what they are. This module knows about two kinds of toolchains:
 
   gcc     the system GNU toolchain (gcc / g++), used for native builds
   zig-cc  the Zig compiler driver in cc mode, used for both native builds and
-          cross-compilation (musl, aarch64, windows) without any extra packages
+          cross-compilation (musl, aarch64, riscv64, arm, windows) without
+          any extra packages
 
 Zig is looked up in this order:
 
@@ -49,14 +50,15 @@ TOOLCHAIN_TIMEOUT = 30
 def _run(argv, timeout=TOOLCHAIN_TIMEOUT):
     """Run a command, return (ok, stdout, stderr).
 
-    Re-validates the executable immediately before use, closing most of the
-    check-to-exec window that a discovery-time-only check leaves open.
+    Re-validates the executable immediately before use and executes the
+    realpath-resolved binary, so the validated path and the executed path
+    are the same file even when the requested path goes through symlinks.
     """
     if argv and not is_trusted(argv[0]):
         return False, "", f"refusing to execute untrusted path: {argv[0]}"
     try:
         proc = subprocess.run(
-            argv,
+            [os.path.realpath(argv[0]), *argv[1:]],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
@@ -125,6 +127,9 @@ def is_trusted(path):
     the next build job rather than trusted from discovery time.
     """
     p = os.path.realpath(path)
+    trusted_uids = {0}
+    if os.geteuid() != 0:
+        trusted_uids.add(os.geteuid())
     try:
         fst = os.lstat(p)
     except OSError:
@@ -133,7 +138,7 @@ def is_trusted(path):
         return False
     # Distro toolchains are root-owned; a root-owned, non-group/world-writable
     # binary in a root-owned directory is safe, as is a user-owned one.
-    if fst.st_uid not in (os.geteuid(), 0):
+    if fst.st_uid not in trusted_uids:
         return False
     if stat.S_IMODE(fst.st_mode) & 0o022:
         return False
@@ -143,7 +148,7 @@ def is_trusted(path):
             dst = os.stat(parent)
         except OSError:
             return False
-        if dst.st_uid not in (os.geteuid(), 0):
+        if dst.st_uid not in trusted_uids:
             return False
         if stat.S_IMODE(dst.st_mode) & 0o022:
             return False
@@ -210,6 +215,9 @@ ZIG_TARGETS = [
     "x86_64-linux-gnu",
     "x86_64-linux-musl",
     "aarch64-linux-gnu",
+    "riscv64-linux-gnu",
+    "riscv64-linux-musl",
+    "arm-linux-musleabihf",
     "x86_64-windows-gnu",
 ]
 
