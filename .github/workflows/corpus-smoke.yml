@@ -1,0 +1,50 @@
+# Manual smoke of the whole chain: install the seed toolchains, build the
+# corpus matrix, extract features for every manifest row, classify one binary,
+# and assert the output shape. Invocation flags follow the corpus builder CLI
+# (see corpus/README.md); adjust here if that entry point moves.
+
+name: Corpus smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: build, extract, classify, assert
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the CLI
+        run: cargo build --release
+
+      - name: Install zig (clang-family seed toolchain)
+        run: |
+          curl -fsSL https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz -o /tmp/zig.tar.xz
+          mkdir -p /tmp/zig && tar -xf /tmp/zig.tar.xz -C /tmp/zig --strip-components=1
+          echo "/tmp/zig" >> "$GITHUB_PATH"
+
+      - name: Build the seed corpus matrix
+        run: python3 corpus/build_corpus.py --jobs 4
+
+      - name: Extract features for every row
+        run: ./target/release/compid batch dataset/manifest.csv --out /tmp/features.jsonl
+
+      - name: Classify the first binary
+        run: |
+          FIRST="$(find dataset/binaries -type f | head -n 1)"
+          echo "first binary: $FIRST"
+          ./target/release/compid extract "$FIRST" -o /tmp/first.json
+          ./target/release/compid classify "$FIRST" | tee /tmp/first.classify
+          ./target/release/compid compare "$FIRST" "$FIRST" | tee /tmp/first.compare
+
+      - name: Assert output shape
+        run: |
+          test -s /tmp/features.jsonl
+          jq -e '.labels and .features' /tmp/first.json >/dev/null
+          grep -q 'compiler_family' /tmp/first.classify
+          grep -qE '1\.0' /tmp/first.compare
