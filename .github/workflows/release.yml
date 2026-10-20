@@ -153,7 +153,10 @@ jobs:
 
       - name: Install cargo-zigbuild and zig
         run: |
-          pip install cargo-zigbuild ziglang
+          # zig is pinned to the version the matrix was verified with:
+          # 0.14.1's powerpc64le glibc stubs resolve the ieee128 redirect
+          # symbols that newer zig releases drop.
+          pip install cargo-zigbuild "ziglang==0.14.1"
           zigdir="$(python3 -c 'import ziglang, pathlib; print(pathlib.Path(ziglang.__file__).parent)')"
           sudo ln -sf "$zigdir/zig" /usr/local/bin/zig
           zig version
