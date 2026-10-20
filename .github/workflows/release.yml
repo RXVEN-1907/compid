@@ -103,13 +103,13 @@ jobs:
           done
           ( cd dist && sha256sum -c "compid-$version-x86_64-unknown-linux-gnu.tar.gz.sha256" )
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: completions
           path: completions-gen/
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-x86_64-unknown-linux-gnu
           path: dist/*
@@ -224,7 +224,7 @@ jobs:
               ;;
           esac
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.target }}
           path: dist/*
@@ -288,7 +288,7 @@ jobs:
                 | grep -q "trained" )
           file compid-universal2 | grep -q "universal"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-macos
           path: dist/*
@@ -340,7 +340,7 @@ jobs:
           /tmp/dist-check/compid-$version-x86_64-pc-windows-msvc/compid.exe classify \
             tests/fixtures/gcc13_O2_x86_64_pie_dynamic | grep -q "trained"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-x86_64-pc-windows-msvc
           path: dist/*
@@ -388,7 +388,7 @@ jobs:
             --completions-dir completions-gen \
             --out dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.target }}
           path: dist/*
