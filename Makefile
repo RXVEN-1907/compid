@@ -1,7 +1,7 @@
 # compid developer tasks - thin wrappers over cargo and python.
 # The justfile mirrors these; use whichever you have installed.
 
-.PHONY: help build test fmt check lint corpus train functions-model mixed-demo smoke clean
+.PHONY: help build test fmt check lint corpus train functions-model mixed-demo smoke dist man clean
 
 help:
 	@echo "compid make targets:"
@@ -14,6 +14,8 @@ help:
 	@echo "  functions-model - retrain model/functions.json from a functions JSONL (FUNCTIONS_JSONL=path)"
 	@echo "  mixed-demo     - the mixed-toolchain function-level acceptance script"
 	@echo "  smoke          - quick end-to-end sanity pass"
+	@echo "  dist           - release tarball + completions + sha256 into dist/ (scripts/dist.sh)"
+	@echo "  man            - render the roff man page (docs/compid.1) to stdout"
 	@echo "  clean          - remove build artifacts"
 
 build:
@@ -47,6 +49,12 @@ mixed-demo: build
 smoke: build
 	./target/release/compid dataset-info
 	./target/release/compid classify "$$(find dataset/binaries -type f | head -n 1)"
+
+dist:
+	./scripts/dist.sh
+
+man:
+	groff -man -Tutf8 docs/compid.1
 
 clean:
 	cargo clean

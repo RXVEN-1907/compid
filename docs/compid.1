@@ -1,0 +1,322 @@
+.TH COMPID 1 "2026-10-20" "compid" "User Commands"
+.SH NAME
+compid \- fingerprint compiled binaries and predict how they were built
+.SH SYNOPSIS
+.B compid
+.RB [ \-\-version ]
+.RB [ \-\-help ]
+.I COMMAND
+.RI [ args ]
+.PP
+One command per line; brackets mark optional arguments.
+.PP
+.B compid extract
+.I BIN
+.RB [ \-o
+.IR FILE ]
+.br
+.B compid classify
+.I BIN
+.RB [ \-\-model
+.IR FILE ]
+.RB [ \-\-json ]
+.RB [ \-\-confidence\-threshold
+.IR P ]
+.br
+.B compid explain
+.I BIN
+.RB [ \-\-model
+.IR FILE ]
+.RB [ \-\-json ]
+.br
+.B compid compare
+.I A
+.I B
+.br
+.B compid model\-info
+.RB [ \-\-model
+.IR FILE ]
+.br
+.B compid dataset\-info
+.RB [ \-\-manifest
+.IR FILE ]
+.br
+.B compid batch
+.I MANIFEST
+.RB [ \-o
+.IR FILE ]
+.br
+.B compid functions
+.I BIN
+.RB [ \-\-model
+.IR FILE ]
+.RB [ \-\-features
+.IR FILE ]
+.br
+.RB [ \-\-json ]
+.RB [ \-\-measure ]
+.br
+.B compid functions\-batch
+.I MANIFEST
+.RB [ \-o
+.IR FILE ]
+.RB [ \-\-features ]
+.br
+.B compid completions
+.RB { bash | zsh | fish | powershell }
+.SH DESCRIPTION
+.B compid
+answers, for a given compiled binary: which compiler and version built it,
+at what optimization level, for which architecture and OS, against which
+libc, and whether it is PIE, LTO-flavored, statically linked, or built with
+hardening flags. It works on ELF, PE (Windows, x86-64), and Mach-O (macOS,
+x86-64 and arm64) binaries; the container is detected from the file's magic
+bytes, and none of the answers require symbols or debug info.
+.PP
+Predictions come from a small linear model over integer features counted in
+the executable section (opcode and byte n-gram shape, section layout, import
+tables, dynamic-loader names). The training pipeline produces the model; the
+extractor also works standalone to dump raw features. Output for a given
+(binary, model, feature schema) triple is deterministic, so outputs are
+diffable.
+.PP
+Defaults that matter: \-\-model defaults to
+.I model/model.json
+(\-\-model on
+.B functions
+defaults to
+.IR model/functions.json ),
+and \-\-manifest on
+.B dataset\-info
+defaults to
+.IR dataset/manifest.csv .
+All three resolve relative to the current directory; pass them explicitly
+when running from elsewhere.
+.SH COMMANDS
+.SS compid extract
+.B compid extract
+.I BIN
+.RB [ \-o
+.IR FILE ]
+.PP
+Prints the feature JSON for one binary to stdout, or writes it to
+.I FILE
+with
+.BR \-o .
+The JSON follows the schema in docs/dataset.md:
+.B build_id
+and
+.B labels
+are empty strings for binaries outside the corpus, and
+.B features
+holds the integer counts over the executable section. PE output carries
+os=windows, the architecture spelled from the COFF machine, and the
+manifest's windows-row conventions for fields a PE does not express
+(pie/static = n/a); Mach-O output carries os=macos, the architecture
+spelled from the header cputype, pie=pie, and the dylib load-command names
+as lowercase basename cmt: features. 32-bit Mach-O images are rejected with
+a clear error.
+.SS compid classify
+.B compid classify
+.I BIN
+.RB [ \-\-model
+.IR FILE ]
+.RB [ \-\-json ]
+.RB [ \-\-confidence\-threshold
+.IR P ]
+.PP
+Loads the model, extracts features from
+.IR BIN ,
+and prints, for each label field the model knows, up to three classes with
+their probabilities. With
+.BR \-\-json ,
+the table becomes a machine-readable object: one entry per field, each a
+map of class name to probability. Consumers should ignore unknown fields;
+the schemas version themselves (format, feature_version).
+.PP
+.B \-\-confidence\-threshold
+.I P
+(default 0.6) flags any field whose top prediction falls below that
+probability: the table prints a [low confidence] marker next to the field
+name and the JSON output gains "low_confidence": true on the field. Pass 0
+to disable flagging entirely. The flag is an abstention hint: a field below
+the threshold is one where the honest answer is that the model is not sure,
+and the top-3 listing is the real answer.
+.SS compid explain
+.B compid explain
+.I BIN
+.RB [ \-\-model
+.IR FILE ]
+.RB [ \-\-json ]
+.PP
+For the top predicted class of each field, lists the features that
+contributed most to that score (weight times normalized tf), plus the
+notable contributions pulling toward the runner-up. Plainly human-readable
+on purpose; the JSON form of the same data is
+.B compid extract
+plus the model.
+.SS compid compare
+.B compid compare
+.I A
+.I B
+.PP
+Prints the cosine similarity between the L2-normalized feature vectors of
+binaries
+.I A
+and
+.IR B .
+1.0 means identical fingerprints (comparing a file with itself is the
+trivially correct case); values near 0 mean unrelated builds. Useful
+against a reference build you trust: a sharp drop in similarity after a
+toolchain bump is exactly the kind of change this catches.
+.SS compid model\-info
+.B compid model\-info
+.RB [ \-\-model
+.IR FILE ]
+.PP
+Describe a trained model: format, the header line classify uses, every
+field with its classes, and the provenance block (manifest row count and
+sha256, feature row count and sha256) when the trainer recorded one.
+.SS compid dataset\-info
+.B compid dataset\-info
+.RB [ \-\-manifest
+.IR FILE ]
+.PP
+Reads the manifest CSV and prints, per label field, the count of rows for
+each label value, along with the total row count and how many duplicate
+SHA-256 rows were found. This is the quickest way to see what a dataset
+actually contains before trusting anything trained on it.
+.SS compid batch
+.B compid batch
+.I MANIFEST
+.RB [ \-o
+.IR FILE ]
+.PP
+Runs extraction for every manifest row whose binary exists. Feature objects
+are emitted as JSON lines, one per binary, to stdout, or appended to
+.I FILE
+with
+.BR \-o .
+Rows whose binary is missing are skipped and summarized in a final line, so
+a partial local checkout still processes everything present.
+.SS compid functions
+.B compid functions
+.I BIN
+.RB [ \-\-model
+.IR FILE ]
+.RB [ \-\-features
+.IR FILE ]
+.RB [ \-\-json ]
+.RB [ \-\-measure ]
+.PP
+Per-function provenance for one binary. Function boundaries come from the
+ELF symbol table, so the input should be an unstripped ELF (a relocatable
+object file works too). The table lists each function's raw (never
+demangled) symbol name, its address as the symbol table records it, its
+size, and, when a function-level model is loaded, the predicted
+compiler_family and opt_level with per-function confidence, plus a footer
+tallying the predicted families.
+.PP
+A stripped x86-64 ELF takes the fallback path: a conservative prologue scan
+over the executable sections proposes the function starts (see
+docs/FUNCTIONS-EVALUATION.md for the measured precision and recall), each
+start is named func_<hex addr>, and the table carries a header note, so
+synthesized names are never mistaken for symbol names. The
+.B \-\-json
+output marks the source explicitly ("source": "heuristic" versus
+"symbol_table"). A stripped non-x86-64 ELF, a PE, and a Mach-O still print
+their explicit reasons instead of a table and exit 0.
+.B \-\-model
+defaults to
+.I model/functions.json
+when that file exists; an explicitly passed
+.B \-\-model
+that does not exist is an error. A model file carries only the two
+per-function fields, so the table never predicts container-level labels.
+.PP
+.B \-\-features
+.I FILE
+writes the per-function training JSONL instead of the table: one object per
+function with build_id, name, addr (hex string), size, labels (the
+extractor's own best-effort container labels), and features.
+.B \-\-json
+swaps the table for a machine-readable object with per-function
+predictions, the boundary source, and the family tally.
+.PP
+.B \-\-measure
+runs the honest self-check instead of the table: on an unstripped binary it
+re-runs the prologue scan and scores the heuristic's starts against the
+symbol table's starts at a 8-byte tolerance, printing counts plus
+precision, recall, and F1
+.RB ( \-\-json
+for the machine-readable form). This is the command behind the measured
+numbers in docs/FUNCTIONS-EVALUATION.md;
+scripts/measure_boundaries.py sweeps it over a manifest sample. A stripped
+binary has no ground truth to measure against and errors out.
+.SS compid functions\-batch
+.B compid functions\-batch
+.I MANIFEST
+.RB [ \-o
+.IR FILE ]
+.RB [ \-\-features ]
+.PP
+Runs per-function extraction over every manifest row whose binary exists
+and carries functions: unstripped ELF via the symbol table, stripped
+x86-64 ELF via the prologue heuristic. With
+.BR \-\-features ,
+writes the per-function training JSONL, one object per function with
+build_id, name, addr, size, labels (the manifest's ground-truth labels for
+that row), and features, which is the input training/train_functions.py
+expects. Without
+.BR \-\-features ,
+writes a plain per-binary listing (name, address, size). Rows whose binary
+is missing, yields no functions, or fails to parse are skipped with a
+per-row stderr note and summarized in the final line.
+.SS compid completions
+.B compid completions
+.RB { bash | zsh | fish | powershell }
+.PP
+Prints a shell completion script to stdout for one of bash, zsh, fish, or
+powershell; no flags, just the script. The subcommand is hidden from
+\-\-help because it is a one-time install helper, not a daily driver.
+Install the script where your shell looks for completions:
+.TP
+bash
+.B compid completions bash
+> ~/.local/share/bash-completion/completions/compid (create the directory
+first if it does not exist; the completion loads on the next interactive
+shell)
+.TP
+zsh
+.B compid completions zsh
+> ~/.zfunc/_compid and make sure ~/.zfunc is in your fpath before compinit
+runs
+.TP
+fish
+.B compid completions fish
+> ~/.config/fish/completions/compid.fish
+.TP
+powershell
+.B compid completions powershell
+>> $PROFILE (or dot-source the output from your profile)
+.PP
+The generated script covers the subcommands and flags of the build that
+produced it, so regenerate it after upgrading compid. Unknown shell names
+are rejected with a usage error (exit code 2) listing the supported ones.
+.SH EXIT STATUS
+.TP
+.B 0
+success
+.TP
+.B 1
+runtime error (unreadable binary, missing model, and the like)
+.TP
+.B 2
+usage error (unknown flag, missing argument)
+.SH SEE ALSO
+Project documentation ships in the repository and in every release tarball
+under docs/: cli.md (full CLI reference), architecture.md, dataset.md,
+model-format.md, FUNCTIONS-EVALUATION.md, and EVALUATION.md.
+.PP
+.BR strip (1),
+.BR file (1)

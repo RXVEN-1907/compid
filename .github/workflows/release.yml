@@ -1,0 +1,144 @@
+# Release pipeline: a pushed v* tag packages the CLI for two Linux targets
+# and publishes both tarballs (plus sha256 checksums) on a GitHub release.
+#
+# A Windows job shipping a PE tarball waits for PE extraction maturity.
+#
+# Cross-compile approach for aarch64 - zig cc as the linker, chosen over
+# cross-rs/cross deliberately: that repository publishes no reusable action
+# (no action.yml at its root, tags end at v0.2.5, so a cross@v10 pin would
+# not resolve), while zig needs no Docker, uses the same 0.14.1 pin the
+# corpus workflow installs, and only has to link - compid and all of its
+# dependencies are pure Rust, so there is no C to cross-compile. The
+# wrapper below rewrites -lgcc_s to -lunwind (the same rewrite
+# cargo-zigbuild applies): rustc no longer passes -lgcc_s on gnu targets,
+# but the rewrite keeps older or future rustc versions linking fine. This
+# exact wiring was verified end to end before being pinned here: a release
+# build of the crate produced a working ELF aarch64 binary.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  dist:
+    name: Package (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows (PE) tarball waits for PE extraction maturity.
+        include:
+          - target: x86_64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install zig (aarch64 linker)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          mkdir -p "$HOME/.local/zig" "$HOME/.local/bin"
+          curl -fsSL https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz \
+            -o /tmp/zig.tar.xz
+          echo "24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c  /tmp/zig.tar.xz" \
+            | sha256sum -c -
+          tar -xf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
+          cat > "$HOME/.local/bin/zig-cc" <<'WRAPPER'
+          #!/usr/bin/env bash
+          args=()
+          for arg in "$@"; do
+            if [ "$arg" = "-lgcc_s" ]; then
+              args+=("-lunwind")
+            else
+              args+=("$arg")
+            fi
+          done
+          exec "$HOME/.local/zig/zig" cc -target aarch64-linux-gnu "${args[@]}"
+          WRAPPER
+          chmod +x "$HOME/.local/bin/zig-cc"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build and package
+        run: ./scripts/dist.sh ${{ matrix.target }}
+        env:
+          # Ignored by the host job's build; cargo only reads the
+          # CARGO_TARGET_<triple>_LINKER variable for its matching target.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: zig-cc
+
+      - name: Smoke the packaged tarball (host target)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          tarball="$(find dist -maxdepth 1 -name '*.tar.gz' -printf '%f\n')"
+          name="${tarball%.tar.gz}"
+          unpacked="/tmp/dist-check/$name"
+          rm -rf /tmp/dist-check && mkdir /tmp/dist-check
+          tar -xzf "dist/$tarball" -C /tmp/dist-check
+          "$unpacked/compid" --version
+          # Default model resolution, run from a repo-root working directory.
+          "$unpacked/compid" classify tests/fixtures/gcc13_O2_x86_64_pie_dynamic
+          # Explicit model pass, the docs-recommended form when classifying
+          # from elsewhere.
+          "$unpacked/compid" classify \
+            --model model/model.json tests/fixtures/gcc13_O2_x86_64_pie_dynamic
+          for f in LICENSE README.md CHANGELOG.md \
+                   docs/compid.1 docs/cli.md \
+                   completions/compid.bash completions/_compid \
+                   completions/compid.fish completions/compid.ps1; do
+            test -f "$unpacked/$f"
+          done
+          ( cd dist && sha256sum -c "$tarball.sha256" )
+
+      - name: Sanity-check the packaged aarch64 binary
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          tarball="$(find dist -maxdepth 1 -name '*.tar.gz' -printf '%f\n')"
+          name="${tarball%.tar.gz}"
+          rm -rf /tmp/dist-check && mkdir /tmp/dist-check
+          tar -xzf "dist/$tarball" -C /tmp/dist-check
+          # No execution smoke: that needs qemu plus the target glibc. The
+          # architecture check is the honest minimum here.
+          info="$(file "/tmp/dist-check/$name/compid")"
+          echo "$info"
+          echo "$info" | grep -q 'aarch64'
+          test -f "/tmp/dist-check/$name/completions/_compid"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: dist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download both artifact sets
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -16,3 +16,6 @@ __pycache__/
 # Sharded feature archives (reassemble: cat train.jsonl.gz.* | gunzip > train.jsonl)
 dataset/features/train.jsonl.gz
 dataset/features/functions.jsonl.gz
+
+# Release packaging output (scripts/dist.sh, .github/workflows/release.yml)
+dist/

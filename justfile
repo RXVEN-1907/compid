@@ -33,5 +33,11 @@ smoke: build
     ./target/release/compid dataset-info
     ./target/release/compid classify "$(find dataset/binaries -type f | head -n 1)"
 
+dist:
+    ./scripts/dist.sh
+
+man:
+    groff -man -Tutf8 docs/compid.1
+
 clean:
     cargo clean
