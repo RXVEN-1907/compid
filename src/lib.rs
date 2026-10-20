@@ -63,12 +63,14 @@ pub fn extract_binary(path: &Path) -> Result<features::ExtractedFeatures> {
 
 /// Read a binary from disk and extract per-function features in one step.
 /// Same container detection as [`extract_binary`]. Function boundaries come
-/// from the ELF symbol table (unstripped ELF, and relocatable objects), the
-/// PE export directory, or the Mach-O `LC_SYMTAB` - or, for a stripped
-/// x86-64 ELF, from the conservative prologue heuristic in [`functions`]
-/// (marked `source: Heuristic` in the result). A PE without an export
-/// table, a Mach-O without a symbol table, and a non-x86-64 stripped ELF
-/// yield an empty function list with a reason.
+/// from the container's symbol source - the ELF symbol table (unstripped
+/// ELF, and relocatable objects), the PE export directory, or the Mach-O
+/// `LC_SYMTAB` - or, when the container carries no symbol source and the
+/// code is x86-64, from the conservative prologue heuristic in
+/// [`functions`] (marked `source: Heuristic` in the result; ELF, PE, and
+/// Mach-O alike). A stripped non-x86-64 binary of any container, and a
+/// symbol source that holds no usable functions, yield an empty function
+/// list with a reason.
 pub fn extract_binary_functions(path: &Path) -> Result<functions::FunctionsExtraction> {
     let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
     let data = std::sync::Arc::new(data);

@@ -221,12 +221,14 @@ fn pe_dll_fixture_enumerates_exported_functions() {
     }
 }
 
-/// A plain PE executable with no export directory keeps the explicit
-/// no-export-table reason - function extraction never guesses boundaries
-/// for a PE without exported symbols. Uses the corpus windows binaries
-/// when present; reports and skips otherwise.
+/// A plain PE executable with no export directory falls back to the
+/// stripped-binary heuristic (x86-64): the boundaries come from the
+/// prologue/call-target scan over the section table's executable sections
+/// with synthesized `func_<rva>` names, or, when that scan finds nothing,
+/// an explicit reason. Uses the corpus windows binaries when present;
+/// reports and skips otherwise.
 #[test]
-fn pe_without_exports_reports_the_reason() {
+fn pe_without_exports_falls_back_to_the_heuristic() {
     let bins = windows_binaries();
     if bins.is_empty() {
         eprintln!("skipping: no dataset/binaries/*windows-gnu* binaries present");
@@ -241,14 +243,42 @@ fn pe_without_exports_reports_the_reason() {
     };
     let info = peinfo_load(plain);
     assert!(info.functions.is_empty());
-    let ex = compid::functions::extract_pe(&info);
-    assert!(ex.functions.is_empty());
-    assert_eq!(ex.source, compid::functions::FunctionSource::SymbolTable);
-    let reason = ex.reason.expect("reason present");
-    assert!(
-        reason.contains("no export table") && reason.contains("exported symbols"),
-        "reason: {reason}"
+    assert_eq!(
+        info.labels.arch, "x86_64",
+        "the corpus is x86_64; a non-x86-64 PE keeps the export requirement"
     );
+    let ex = compid::functions::extract_pe(&info);
+    assert_eq!(
+        ex.source,
+        compid::functions::FunctionSource::Heuristic,
+        "a plain x86-64 PE's boundaries come from the heuristic"
+    );
+    if ex.functions.is_empty() {
+        let reason = ex.reason.expect("reason present");
+        assert!(
+            reason.contains("no export table") && reason.contains("heuristic found no candidate"),
+            "reason: {reason}"
+        );
+    } else {
+        assert!(ex.reason.is_none(), "reason: {:?}", ex.reason);
+        for f in &ex.functions {
+            assert!(f.name.starts_with("func_"), "synthesized name: {}", f.name);
+            assert!(f.size >= 16, "minimum size holds: {}", f.name);
+            assert!(
+                f.features.keys().any(|k| k.starts_with("fn:")),
+                "{} carries an fn: bucket",
+                f.name
+            );
+            assert!(
+                !f.features.keys().any(|k| k.starts_with("cmt:")),
+                "{} carries no container residue",
+                f.name
+            );
+        }
+        for pair in ex.functions.windows(2) {
+            assert!(pair[0].addr < pair[1].addr, "sorted by address");
+        }
+    }
 }
 
 /// Report what the binaries directory holds right now.

@@ -6,7 +6,6 @@
 //! payload.
 
 use compid::{elfinfo, functions, model};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Two known 64-byte functions back to back. `alpha` opens with the
@@ -477,8 +476,13 @@ fn stripped_non_x86_64_elf_keeps_the_symbol_table_requirement() {
 /// committed unstripped fixture at test time and compare the heuristic's
 /// starts with the original's symbol-table starts. Skipped when `strip` is
 /// unavailable or the fixture is absent.
+// Linux-only: it shells out to binutils `strip` on an ELF fixture, which
+// Apple's strip cannot parse and Windows has no ELF-capable strip for.
+#[cfg(target_os = "linux")]
 #[test]
 fn stripped_fixture_heuristic_matches_symbol_ground_truth() {
+    use std::path::PathBuf;
+
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let unstripped_path = dir.join("gcc13_O2_x86_64_pie_dynamic");
     if !unstripped_path.exists() {

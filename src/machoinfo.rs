@@ -31,7 +31,11 @@
 //!   size, so each function's size is derived: the delta to the next defined
 //!   symbol in the same section, or the section end for the last one. Names
 //!   keep the ABI's leading underscore (`_main`) - the raw symbol-table
-//!   spelling, the same raw-never-demangled rule the ELF path follows.
+//!   spelling, the same raw-never-demangled rule the ELF path follows. A
+//!   stripped x86-64 image falls back to the stripped-binary prologue
+//!   heuristic over the `__TEXT` code sections (virtual addresses, via
+//!   `functions::heuristic_functions_macho`); a stripped arm64 image
+//!   reports an explicit reason.
 
 use anyhow::{anyhow, bail, Context, Result};
 use goblin::mach::constants::cputype;

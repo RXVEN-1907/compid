@@ -24,7 +24,11 @@
 //!   one (see [`PeInfo::functions`]). The export table records no sizes, so
 //!   each export's size is derived: the delta to the next export's RVA in
 //!   the same section, or the section end for the last one. A plain
-//!   executable carries no export directory at all.
+//!   executable carries no export directory at all; a plain x86-64
+//!   executable falls back to the stripped-binary prologue heuristic over
+//!   the section table's executable sections (RVAs, via
+//!   `functions::heuristic_functions_pe`), while a non-x86-64 one reports
+//!   an explicit reason.
 
 use anyhow::{anyhow, bail, Context, Result};
 use goblin::pe::header as coff;

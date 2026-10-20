@@ -9,21 +9,26 @@
 //! `sec:`/`ent:` geometry and no `cmt:` residue: those describe the
 //! container, not a function.
 //!
-//! Function boundaries come from three symbol sources. For an unstripped
-//! ELF (and relocatable objects): SHT_SYMTAB entries of type STT_FUNC with
-//! a nonzero `st_size`, deduplicated by `(st_value, st_size)`, raw (never
-//! demangled) names. For a PE: the export directory's named exports, sizes
-//! derived from the next export's RVA. For a Mach-O: `LC_SYMTAB` entries of
-//! type `N_SECT` in executable `__TEXT` sections, sizes derived from the
-//! next symbol's value. For a stripped x86-64 ELF: a conservative prologue
-//! scan over the executable sections (see [`PROLOGUE_PATTERNS`]) unioned
-//! with direct call-target analysis (see [`collect_direct_branch_targets`]),
-//! with synthesized `func_<hex addr>` names. What stays an explicit reason
-//! rather than a guess: a PE without an export table, a Mach-O without a
-//! symbol table, and a non-x86-64 stripped ELF - an empty function list
-//! with a reason string instead of guessed boundaries.
+//! Function boundaries come from a symbol source the container itself
+//! carries, and fall back to a conservative heuristic when there is none.
+//! Symbol sources: the ELF symbol table (SHT_SYMTAB STT_FUNC entries with a
+//! nonzero `st_size` - unstripped ELF and relocatable objects), the PE
+//! export directory's named exports (sizes derived from the next export's
+//! RVA), and the Mach-O `LC_SYMTAB` (`N_SECT` entries in executable `__TEXT`
+//! sections, sizes derived from the next symbol's value). When the container
+//! carries no symbol source at all and the code is x86-64, the boundaries
+//! come from a conservative prologue scan over the executable sections (see
+//! [`PROLOGUE_PATTERNS`]) unioned with direct call-target analysis (see
+//! [`collect_direct_branch_targets`]), with synthesized `func_<hex addr>`
+//! names - addresses are RVAs on PE and virtual addresses on Mach-O, the
+//! same convention the container's own symbol source reports. What stays an
+//! explicit reason rather than a guess: a non-x86-64 stripped binary (any
+//! container), a symbol source that exists but holds no usable functions
+//! (an export table without usable exports, a symtab without usable
+//! symbols), and a heuristic that finds no candidates - an empty function
+//! list with a reason string instead of guessed boundaries.
 
-use crate::elfinfo::{ElfInfo, FunctionSymbol};
+use crate::elfinfo::{ElfInfo, FunctionSymbol, SectionInfo};
 use crate::features::{disassemble_window, log2_size, Labels, WINDOW_SIZE};
 use crate::machoinfo::MachoInfo;
 use crate::peinfo::PeInfo;
@@ -59,8 +64,9 @@ pub enum FunctionSource {
     /// objects), the PE export directory, or the Mach-O `LC_SYMTAB`.
     SymbolTable,
     /// Conservative prologue-pattern scan plus direct call-target analysis
-    /// over the executable sections of a stripped x86-64 ELF; names are
-    /// synthesized (`func_<hex addr>`).
+    /// over the executable sections of a stripped x86-64 binary (ELF, PE,
+    /// or Mach-O); names are synthesized (`func_<hex addr>`, RVAs on PE and
+    /// virtual addresses on Mach-O).
     Heuristic,
 }
 
@@ -77,11 +83,12 @@ pub struct FunctionsExtraction {
     pub source: FunctionSource,
     /// One entry per function, ordered by address.
     pub functions: Vec<FunctionFeatures>,
-    /// Set when function-level extraction does not apply: a container with
-    /// no usable symbol source for this round (a PE without an export
-    /// table, a Mach-O without a symbol table, a stripped non-x86-64 ELF),
-    /// or a stripped binary whose executable sections held no heuristic
-    /// candidates.
+    /// Set when function-level extraction does not apply: a stripped binary
+    /// whose heuristic found no candidate starts in the executable sections,
+    /// a symbol source that exists but carries no usable functions (an
+    /// export table without usable exports, a symtab without usable
+    /// function symbols), or a stripped non-x86-64 binary the scanner
+    /// cannot read boundaries for.
     pub reason: Option<String>,
 }
 
@@ -580,25 +587,31 @@ pub fn scan_heuristic_candidates(bytes: &[u8], base_addr: u64) -> Vec<(u64, u64)
     merge_and_size_candidates(bytes, hits)
 }
 
-/// Function boundaries for a stripped x86-64 ELF: run
-/// [`scan_heuristic_candidates`] (prologue patterns plus direct call
-/// targets) over every executable, byte-backed section and name each
-/// candidate `func_<hex virtual address>`. Returns functions ordered by
-/// address. Empty when the binary exposes no executable section bytes or
-/// the scan finds nothing.
-pub fn heuristic_functions(info: &ElfInfo) -> Vec<FunctionSymbol> {
+/// The heuristic scan's per-section pipeline, shared by every container:
+/// run [`scan_heuristic_candidates`] (prologue patterns plus direct call
+/// targets) over each section's file bytes and name each candidate
+/// `func_<hex virtual address>` - `addr` is the section's own address
+/// convention (ELF `sh_addr`, PE RVA, Mach-O virtual address), so a
+/// heuristic address is directly comparable with what the same container's
+/// symbol source reports. `sections` is the pre-filtered list of
+/// executable, byte-backed sections in scan order; `bytes_of` fetches one
+/// section's file bytes (clamped to the file extent). Returns functions
+/// ordered by address.
+fn heuristic_section_symbols<'a, I, F>(sections: I, bytes_of: F) -> Vec<FunctionSymbol>
+where
+    I: IntoIterator<Item = &'a SectionInfo>,
+    F: Fn(&SectionInfo) -> Vec<u8>,
+{
     let mut out: Vec<FunctionSymbol> = Vec::new();
-    for section in &info.sections {
-        if !section.executable || section.no_bits || section.size == 0 {
-            continue;
-        }
-        let bytes = info.file_slice(section.offset, section.size);
+    for section in sections {
+        let bytes = bytes_of(section);
         if bytes.is_empty() {
             continue;
         }
         for (start, size) in scan_heuristic_candidates(&bytes, section.addr) {
-            // Both additions saturate: `addr` is an untrusted sh_addr plus a
-            // scan offset, and a crafted header can carry u64::MAX values.
+            // Both additions saturate: `addr` is an untrusted header value
+            // plus a scan offset, and a crafted header can carry u64::MAX
+            // values.
             let addr = section.addr.saturating_add(start);
             out.push(FunctionSymbol {
                 name: format!("func_{addr:x}"),
@@ -610,6 +623,73 @@ pub fn heuristic_functions(info: &ElfInfo) -> Vec<FunctionSymbol> {
     }
     out.sort_by(|a, b| a.addr.cmp(&b.addr).then_with(|| a.name.cmp(&b.name)));
     out
+}
+
+/// The sections the heuristic scans in one container: executable
+/// (`SHF_EXECINSTR` on ELF, the execute flag on PE, a `__TEXT` section on
+/// Mach-O) with bytes actually in the file.
+fn heuristic_eligible(section: &&SectionInfo) -> bool {
+    section.executable && !section.no_bits && section.size > 0
+}
+
+/// Function boundaries for a stripped x86-64 ELF: run
+/// [`scan_heuristic_candidates`] (prologue patterns plus direct call
+/// targets) over every executable, byte-backed section. Returns functions
+/// ordered by address. Empty when the binary exposes no executable section
+/// bytes or the scan finds nothing.
+pub fn heuristic_functions(info: &ElfInfo) -> Vec<FunctionSymbol> {
+    heuristic_section_symbols(info.sections.iter().filter(heuristic_eligible), |s| {
+        info.file_slice(s.offset, s.size)
+    })
+}
+
+/// Function boundaries for a stripped x86-64 PE: run
+/// [`scan_heuristic_candidates`] over every executable, byte-backed section
+/// of the section table. Candidates align against and report as RVAs
+/// (`SectionInfo::addr` is the section's `VirtualAddress`), while the bytes
+/// scanned and the recorded file offsets come from the section's raw data
+/// (`PointerToRawData`) - the same RVA-to-file-offset mapping
+/// [`crate::peinfo::PeInfo::functions`] applies to exports, so a heuristic
+/// address is directly comparable with an export-table address. Empty for a
+/// non-x86-64 machine (the prologue patterns and the decoder read x86-64
+/// only) and when the image exposes no executable section bytes or the scan
+/// finds nothing. Returns functions ordered by address.
+pub fn heuristic_functions_pe(info: &PeInfo) -> Vec<FunctionSymbol> {
+    if !info.disassembles_x86_64() {
+        return Vec::new();
+    }
+    heuristic_section_symbols(info.sections.iter().filter(heuristic_eligible), |s| {
+        info.section_data(s.offset, s.size)
+    })
+}
+
+/// The `__TEXT` sections the Mach-O heuristic may scan. Mach-O has no
+/// per-section execute bit - `SectionInfo::executable` marks every
+/// `__TEXT`-segment section, metadata included - and a prologue scan over
+/// `__unwind_info`'s records or `__eh_frame`'s CFI entries can only misread
+/// structured data as function starts. The code an x86-64 image carries
+/// lives in `__text` plus the stub-helper thunks; `__stubs` is a PLT by
+/// construction and is a no-op under the PLT-shape gates anyway.
+const MACHO_HEURISTIC_SECTIONS: &[&str] = &["__TEXT,__text", "__TEXT,__stub_helper"];
+
+/// Function boundaries for a stripped x86-64 Mach-O: run
+/// [`scan_heuristic_candidates`] over the byte-backed code sections of the
+/// `__TEXT` segment (see [`MACHO_HEURISTIC_SECTIONS`]). Candidates align
+/// against and report as virtual addresses (`SectionInfo::addr` is
+/// `sect.addr`), matching what the `LC_SYMTAB` source reports. Empty for a
+/// non-x86-64 cputype (an arm64 image's boundaries are never guessed) and
+/// when the image exposes no code section bytes or the scan finds nothing.
+/// Returns functions ordered by address.
+pub fn heuristic_functions_macho(info: &MachoInfo) -> Vec<FunctionSymbol> {
+    if !info.disassembles_x86_64() {
+        return Vec::new();
+    }
+    heuristic_section_symbols(
+        info.sections.iter().filter(|s| {
+            heuristic_eligible(s) && MACHO_HEURISTIC_SECTIONS.contains(&s.name.as_str())
+        }),
+        |s| info.section_data(s.offset, s.size),
+    )
 }
 
 /// Per-function extraction from parsed ELF material. An unstripped ELF
@@ -688,16 +768,47 @@ pub fn extract_elf(info: &ElfInfo) -> FunctionsExtraction {
 }
 
 /// Per-function extraction from parsed PE material: the export directory is
-/// the symbol source. A binary with named exports in an executable section
-/// (DLLs, and executables that export symbols) lists them with sizes
-/// derived from the export table - the delta to the next export's RVA,
-/// the section end for the last one; a plain executable with no export
-/// directory, or one whose table carries no usable function exports, stays
-/// an empty list with an explicit reason. Every listed function's bytes are
-/// read through [`PeInfo::section_data`].
+/// the symbol source, the prologue heuristic the fallback. An image with
+/// named exports in an executable section (DLLs, and executables that
+/// export symbols) lists them with sizes derived from the export table -
+/// the delta to the next export's RVA, the section end for the last one. A
+/// plain executable with no export directory falls back to
+/// [`heuristic_functions_pe`] for x86-64 (with
+/// `source: FunctionSource::Heuristic`) and keeps an explicit reason for
+/// any other machine; an export table that carries no usable function
+/// exports is a reason, not a heuristic trigger, mirroring the ELF side's
+/// symtab-present rule. Every listed function's bytes are read through
+/// [`PeInfo::section_data`].
 pub fn extract_pe(info: &PeInfo) -> FunctionsExtraction {
     let labels = Labels::from_pe(info);
     let build_id = info.build_id.clone();
+
+    if info.functions.is_empty() && !info.has_exports && info.disassembles_x86_64() {
+        // No export table, x86-64 code: the boundary heuristic owns the
+        // boundaries.
+        let functions = heuristic_functions_pe(info)
+            .into_iter()
+            .map(|fs| FunctionFeatures {
+                name: fs.name.clone(),
+                addr: fs.addr,
+                size: fs.size,
+                features: function_features(&info.section_data(fs.file_offset, fs.size)),
+            })
+            .collect::<Vec<_>>();
+        let reason = functions.is_empty().then(|| {
+            "no export table: binary looks stripped, and the stripped-binary \
+             heuristic found no candidate function starts in the executable \
+             sections"
+                .to_string()
+        });
+        return FunctionsExtraction {
+            build_id,
+            labels,
+            source: FunctionSource::Heuristic,
+            functions,
+            reason,
+        };
+    }
 
     let functions = info
         .functions
@@ -714,8 +825,11 @@ pub fn extract_pe(info: &PeInfo) -> FunctionsExtraction {
             "export table carries no usable function exports (named exports \
              landing in an executable section)"
         } else {
-            "no export table: PE function extraction needs exported symbols \
-             this round"
+            // Reached only for a non-x86-64 image: the x86-64 case returned
+            // through the heuristic branch above.
+            "no export table: binary looks stripped; the stripped-binary \
+             heuristic reads x86-64 only, so function extraction needs \
+             exported symbols"
         }
         .to_string()
     });
@@ -828,16 +942,47 @@ pub fn measure_boundaries(info: &ElfInfo) -> Result<BoundaryMetrics> {
 }
 
 /// Per-function extraction from parsed Mach-O material: the `LC_SYMTAB`
-/// symbol table is the symbol source. An unstripped image lists its
-/// defined, non-stab symbols in executable `__TEXT` sections (raw names
-/// with the ABI's leading underscore; sizes derived from the next symbol's
-/// value - see [`crate::machoinfo::MachoInfo::functions`]); a stripped
-/// image, or one whose symtab holds no usable functions, stays an empty
-/// list with an explicit reason. Every listed function's bytes are read
-/// through [`MachoInfo::section_data`].
+/// symbol table is the symbol source, the prologue heuristic the fallback.
+/// An unstripped image lists its defined, non-stab symbols in executable
+/// `__TEXT` sections (raw names with the ABI's leading underscore; sizes
+/// derived from the next symbol's value - see
+/// [`crate::machoinfo::MachoInfo::functions`]). A stripped image falls back
+/// to [`heuristic_functions_macho`] for x86-64 (with
+/// `source: FunctionSource::Heuristic`) and keeps an explicit reason for
+/// any other architecture; a symtab that holds no usable functions is a
+/// reason, not a heuristic trigger, mirroring the ELF side's
+/// symtab-present rule. Every listed function's bytes are read through
+/// [`MachoInfo::section_data`].
 pub fn extract_macho(info: &MachoInfo) -> FunctionsExtraction {
     let labels = Labels::from_macho(info);
     let build_id = info.build_id.clone();
+
+    if info.functions.is_empty() && !info.has_symtab && info.disassembles_x86_64() {
+        // No symbol table, x86-64 code: the boundary heuristic owns the
+        // boundaries.
+        let functions = heuristic_functions_macho(info)
+            .into_iter()
+            .map(|fs| FunctionFeatures {
+                name: fs.name.clone(),
+                addr: fs.addr,
+                size: fs.size,
+                features: function_features(&info.section_data(fs.file_offset, fs.size)),
+            })
+            .collect::<Vec<_>>();
+        let reason = functions.is_empty().then(|| {
+            "no symbol table: binary looks stripped, and the stripped-binary \
+             heuristic found no candidate function starts in the __TEXT code \
+             sections"
+                .to_string()
+        });
+        return FunctionsExtraction {
+            build_id,
+            labels,
+            source: FunctionSource::Heuristic,
+            functions,
+            reason,
+        };
+    }
 
     let functions = info
         .functions
@@ -855,8 +1000,11 @@ pub fn extract_macho(info: &MachoInfo) -> FunctionsExtraction {
              non-stab symbols in an executable __TEXT section with a \
              derived size)"
         } else {
-            "no symbol table: binary looks stripped; function extraction \
-             needs an unstripped Mach-O"
+            // Reached only for a non-x86-64 image: the x86-64 case returned
+            // through the heuristic branch above.
+            "no symbol table: binary looks stripped; the stripped-binary \
+             heuristic reads x86-64 only, so function extraction needs an \
+             unstripped Mach-O"
         }
         .to_string()
     });
