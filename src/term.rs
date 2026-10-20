@@ -44,8 +44,16 @@ pub enum ColorChoice {
 impl ColorChoice {
     /// Resolve against this process's stdout and environment.
     pub fn resolves(self) -> bool {
+        let stdout_is_tty = std::io::stdout().is_terminal();
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-        self.resolves_given(std::io::stdout().is_terminal(), no_color)
+        let colored = self.resolves_given(stdout_is_tty, no_color);
+        // Classic conhost renders the escapes only once the stdout console
+        // mode carries the VT flag; the decision itself is unchanged.
+        #[cfg(windows)]
+        if colored && stdout_is_tty {
+            enable_vt();
+        }
+        colored
     }
 
     /// The pure decision core, testable without touching the environment:
@@ -57,6 +65,31 @@ impl ColorChoice {
             ColorChoice::Always => true,
             ColorChoice::Never => false,
         }
+    }
+}
+
+/// Turn on `ENABLE_VIRTUAL_TERMINAL_PROCESSING` for the stdout console so
+/// the escapes render on classic conhost; Windows Terminal ships with the
+/// flag already set. Every other mode bit is preserved, and the answer is
+/// false when stdout is not a console (pipe, file, detached) or the API
+/// refuses - the caller keeps its color decision either way.
+#[cfg(windows)]
+fn enable_vt() -> bool {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE,
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE,
+    };
+
+    let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    if handle.is_null() || handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        return false;
+    }
+    let mut mode: CONSOLE_MODE = 0;
+    unsafe {
+        // Read the mode before writing it: a console that cannot be read
+        // (stdout is a pipe or file) must not have its mode overwritten.
+        GetConsoleMode(handle, &mut mode) != 0
+            && SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
     }
 }
 
@@ -229,5 +262,15 @@ mod tests {
                 });
             assert_eq!(found, Some(expected), "flag value {word:?} stays available");
         }
+    }
+
+    // The harness's stdout is a pipe, so the helper answers false here; in
+    // an inherited console it flips the flag on. Either way the call must
+    // not panic, must not lose mode bits, and must be idempotent.
+    #[cfg(windows)]
+    #[test]
+    fn vt_enabling_is_idempotent_on_any_stdout_kind() {
+        let first = enable_vt();
+        assert_eq!(enable_vt(), first, "the call is idempotent");
     }
 }

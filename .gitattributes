@@ -1,0 +1,5 @@
+# Binary fixtures must survive every clone config byte for byte - the test
+# suite parses exact headers, so a line-ending rewrite would corrupt them.
+tests/fixtures/* binary
+*.png binary
+*.gif binary

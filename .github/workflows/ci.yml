@@ -34,6 +34,44 @@ jobs:
       - name: Binary smoke
         run: ./target/release/compid --help
 
+  rust-windows:
+    name: Rust (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --all
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Binary smoke
+        run: ./target/release/compid --help
+
+  rust-macos:
+    name: Rust (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --all
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Binary smoke
+        run: ./target/release/compid --help
+
   python:
     name: Python trainer entry point
     runs-on: ubuntu-latest
