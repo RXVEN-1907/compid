@@ -219,6 +219,8 @@ ZIG_TARGETS = [
     "riscv64-linux-musl",
     "arm-linux-musleabihf",
     "x86_64-windows-gnu",
+    "x86_64-macos",
+    "aarch64-macos",
 ]
 
 # Native target for the current machine, used for plain gcc builds.

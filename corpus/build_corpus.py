@@ -72,6 +72,7 @@ ZIG_AARCH64_OPTS = ["O0", "O2"]
 ZIG_RISCV64_OPTS = ["O0", "O2"]
 ZIG_ARMHF_OPTS = ["O0", "O2"]
 ZIG_WINDOWS_OPTS = ["O0", "O2"]
+ZIG_MACOS_OPTS = ["O0", "O2"]
 ZIG_CXX_OPTS = ["O0", "O2"]
 # How many of the sorted C++ sources (which all compile clean for the new
 # targets) join the cross matrix; the rest stay x86_64-only to keep the
@@ -99,6 +100,10 @@ def inspect_elf(path):
         return "n/a", "n/a"
     if len(head) < 64 or head[:2] == b"MZ":
         return "n/a", "n/a"
+    if head[:4] == b"\xcf\xfa\xed\xfe":
+        # 64-bit Mach-O (little-endian): macOS executables are PIE and link
+        # dynamically against libSystem; static linking is not in the matrix.
+        return "pie", "n/a"
     if head[:4] != b"\x7fELF":
         return "n/a", "n/a"
     e_type = int.from_bytes(head[16:18], "little")
@@ -133,13 +138,18 @@ def source_files():
 
 def target_labels(target):
     arch, rest = target.split("-", 1)
-    osname, abi = rest.split("-", 1)
-    # The abi label is the libc family, gnu or musl. Triple suffixes that
-    # only refine it (musleabi, musleabihf) fold into musl so the column
-    # stays comparable across targets; the exact triple is preserved in the
-    # build_id and the toolchain target list.
-    if abi.startswith("musl"):
-        abi = "musl"
+    parts = rest.split("-", 1)
+    if len(parts) == 2:
+        osname, abi = parts
+        # The abi label is the libc family, gnu or musl. Triple suffixes that
+        # only refine it (musleabi, musleabihf) fold into musl so the column
+        # stays comparable across targets; the exact triple is preserved in the
+        # build_id and the toolchain target list. Targets without a libc
+        # component (macos, which links libSystem) label abi n-a.
+        if abi.startswith("musl"):
+            abi = "musl"
+    else:
+        osname, abi = rest, "n-a"
     return arch, osname, abi
 
 
@@ -233,6 +243,10 @@ def build_plan(toolchains):
                 add("zig-cc", "arm-linux-musleabihf", opt, "default", "off", "static", path, "c")
             for opt in ZIG_WINDOWS_OPTS:
                 add("zig-cc", "x86_64-windows-gnu", opt, "default", "off", "dyn", path, "c")
+            for opt in ZIG_MACOS_OPTS:
+                add("zig-cc", "x86_64-macos", opt, "default", "off", "dyn", path, "c")
+            for opt in ZIG_MACOS_OPTS:
+                add("zig-cc", "aarch64-macos", opt, "default", "off", "dyn", path, "c")
         for i, (sid, path, lang) in enumerate(cxx_srcs):
             for opt in ZIG_CXX_OPTS:
                 add("zig-cc", "x86_64-linux-gnu", opt, "default", "off", "dyn", path, lang)
@@ -241,6 +255,8 @@ def build_plan(toolchains):
                     ("riscv64-linux-gnu", ZIG_RISCV64_OPTS, "dyn"),
                     ("riscv64-linux-musl", ZIG_MUSL_OPTS, "static"),
                     ("arm-linux-musleabihf", ZIG_ARMHF_OPTS, "static"),
+                    ("x86_64-macos", ZIG_MACOS_OPTS, "dyn"),
+                    ("aarch64-macos", ZIG_MACOS_OPTS, "dyn"),
                 ):
                     for opt in opts:
                         add("zig-cc", target, opt, "default", "off", static, path, lang)

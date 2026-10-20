@@ -49,7 +49,8 @@ families of code, not single programs.
   target     x86_64-linux-gnu (both), x86_64-linux-musl (zig),
              aarch64-linux-gnu (zig), riscv64-linux-gnu (zig),
              riscv64-linux-musl (zig), arm-linux-musleabihf (zig),
-             x86_64-windows-gnu (zig)
+             x86_64-windows-gnu (zig), x86_64-macos (zig),
+             aarch64-macos (zig)
   opt        O0 O1 O2 O3 Os, plus Oz on zig
   pie        explicit -pie and -no-pie on native gcc glibc builds
   lto        -flto on a slice of gcc linux builds
