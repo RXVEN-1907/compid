@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Mach-O (macOS) support in extraction: `compid extract`, `classify`,
+  `explain`, and `compare` detect the Mach-O container from its magic
+  bytes and read 64-bit images (x86-64 and arm64; 32-bit is rejected with
+  a clear error). Mach-O binaries report `os=macos`, the cputype-spelled
+  architecture (`x86_64`, `aarch64`), and `pie=pie`; section geometry and
+  entropy key on the `__SEGMENT,__section` spelling, dylib load-command
+  names feed the `cmt:` namespace as lowercase basenames, and the clean
+  disassembly-window count files under the new `meta:macos` feature.
+  The build matrix now seeds `x86_64-macos` and `aarch64-macos` rows and
+  the retrained model carries a three-way `os` field (linux/windows/macos).
 - Windows PE (x86-64) support in extraction and classification: `compid
   extract`, `classify`, `explain`, `compare`, and `batch` detect the
   container from the file's magic bytes. PE binaries report `os=windows`
