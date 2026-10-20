@@ -13,8 +13,31 @@ pub fn classification(
     ef: &ExtractedFeatures,
     pred: &Prediction,
     json: bool,
+    confidence_threshold: Option<f64>,
 ) -> String {
     if json {
+        // Mirror the table's low-confidence flag into the JSON so both sinks
+        // agree; probabilities were already there, the flag is the verdict.
+        if let Some(t) = confidence_threshold {
+            if let Ok(mut value) = serde_json::to_value(pred) {
+                if let Some(fields) = value.get_mut("fields").and_then(|f| f.as_array_mut()) {
+                    for f in fields {
+                        let low = f
+                            .get("top3")
+                            .and_then(|t3| t3.get(0))
+                            .and_then(|top| top.get("probability"))
+                            .and_then(|p| p.as_f64())
+                            .map(|p| p < t)
+                            .unwrap_or(false);
+                        if let Some(obj) = f.as_object_mut() {
+                            obj.insert("low_confidence".into(), serde_json::Value::Bool(low));
+                        }
+                    }
+                }
+                return serde_json::to_string_pretty(&value)
+                    .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"));
+            }
+        }
         return serde_json::to_string_pretty(pred)
             .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"));
     }
@@ -31,16 +54,23 @@ pub fn classification(
     }
     for f in &pred.fields {
         out.push('\n');
-        out.push_str(&field_block(f));
+        let low = confidence_threshold
+            .map(|t| f.top3.first().map(|r| r.probability < t).unwrap_or(false))
+            .unwrap_or(false);
+        out.push_str(&field_block(f, low));
     }
     out
 }
 
 /// One field's top-3 table block.
-fn field_block(f: &crate::model::FieldPrediction) -> String {
+fn field_block(f: &crate::model::FieldPrediction, low_confidence: bool) -> String {
     let mut out = String::new();
-    out.push_str(&f.field);
-    out.push('\n');
+    if low_confidence {
+        out.push_str(&format!("{}  [low confidence]\n", f.field));
+    } else {
+        out.push_str(&f.field);
+        out.push('\n');
+    }
     let width = f
         .top3
         .iter()

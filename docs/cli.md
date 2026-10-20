@@ -93,6 +93,17 @@ with itself is the trivially correct case; values near `0` mean unrelated
 builds. Useful against a reference build you trust: a sharp drop in
 similarity after a toolchain bump is exactly the kind of change this catches.
 
+## compid classify --confidence-threshold
+
+    compid classify <BIN> [--confidence-threshold P]
+
+`P` (default 0.6) flags any field whose top prediction falls below that
+probability: the table prints a `[low confidence]` marker next to the field
+name and the JSON output gains `"low_confidence": true` on the field. Pass
+0 to disable flagging entirely. The flag is an abstention hint - a field
+below the threshold is one where the honest answer is "the model is not
+sure", and the top-3 listing is the real answer.
+
 ## compid model-info
 
     compid model-info [--model PATH]

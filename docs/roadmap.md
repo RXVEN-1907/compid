@@ -66,8 +66,11 @@ headers state how many builds stand behind a model.
 
 ## Later / under consideration
 
-- Confidence calibration and an abstention signal: "none of these classes
-  fits well" beats a confident wrong answer.
+- Confidence calibration: full per-field calibration curves remain open.
+  The abstention half is done as of this round - `classify` flags fields
+  whose top prediction falls below the confidence threshold (default 0.6,
+  `--confidence-threshold` to tune, 0 to disable), in both the table and
+  the JSON output.
 - Hardened-build flag axes in the matrix (`-fstack-protector-all`, CFI,
   shadow stacks) for realism on modern binaries.
 - Continuous fuzzing of the extractor's parsing path, since it eats

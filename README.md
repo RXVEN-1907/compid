@@ -206,6 +206,14 @@ Linux, PE Windows, and Mach-O macOS. `lto` sits at its majority baseline
 until the matrix gains more LTO-built rows, and `opt_level`'s confusion is
 concentrated in O2/O3 pairs.
 
+Because a confident wrong answer is the worst outcome, `classify` flags
+abstention: any field whose top prediction falls below the confidence
+threshold (60% by default, tuned with `--confidence-threshold`) prints a
+`[low confidence]` marker, and the JSON output carries the same
+`low_confidence` flag per field. The threshold is not calibration - it is
+an honest, visible "the model is not sure here". Full calibration curves
+remain future work.
+
 ## Expanding the matrix
 
 Every row of the dataset is one (source, toolchain, flags) build recorded in

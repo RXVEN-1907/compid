@@ -5,10 +5,11 @@ All notable changes to compid are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
+- Abstention signal in `compid classify`: fields whose top prediction
+  falls below the confidence threshold (default 0.6, `--confidence-threshold`
+  to tune, 0 to disable) print a `[low confidence]` marker in the table and
+  carry `"low_confidence"` in the JSON output - a visible "the model is not
+  sure here" instead of a bare confident number.
 - Model provenance and `compid model-info`: trained models now carry a
   provenance block (manifest row count and sha256, features row count and
   sha256), `compid model-info` prints the fields, classes, and provenance

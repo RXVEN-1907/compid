@@ -57,6 +57,10 @@ enum Cmd {
         /// Emit machine-readable JSON instead of a table
         #[arg(long)]
         json: bool,
+        /// Flag fields whose top prediction is below this probability
+        /// (0 disables flagging)
+        #[arg(long, value_name = "P", default_value_t = 0.6)]
+        confidence_threshold: f64,
     },
     /// Show which features drive each predicted label
     Explain {
@@ -153,7 +157,12 @@ fn main() {
 fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Extract { bin, out } => cmd_extract(&bin, out.as_deref()),
-        Cmd::Classify { bin, model, json } => cmd_classify(&bin, &model, json),
+        Cmd::Classify {
+            bin,
+            model,
+            json,
+            confidence_threshold,
+        } => cmd_classify(&bin, &model, json, confidence_threshold),
         Cmd::Explain { bin, model, json } => cmd_explain(&bin, &model, json),
         Cmd::Compare { a, b } => cmd_compare(&a, &b),
         Cmd::DatasetInfo { manifest } => cmd_dataset_info(&manifest),
@@ -248,11 +257,28 @@ fn load_model(path: &Path) -> Result<model::Model> {
     model::Model::load(path)
 }
 
-fn cmd_classify(bin: &Path, model_path: &Path, json: bool) -> Result<()> {
+fn cmd_classify(
+    bin: &Path,
+    model_path: &Path,
+    json: bool,
+    confidence_threshold: f64,
+) -> Result<()> {
+    if !(0.0..=1.0).contains(&confidence_threshold) {
+        bail!("--confidence-threshold must be between 0 and 1");
+    }
+    let threshold = (confidence_threshold > 0.0).then_some(confidence_threshold);
     let m = load_model(model_path)?;
     let ef = extract_binary(bin)?;
     let pred = m.predict(&ef.features);
-    let text = report::classification(bin, model_path, &m.header_line(), &ef, &pred, json);
+    let text = report::classification(
+        bin,
+        model_path,
+        &m.header_line(),
+        &ef,
+        &pred,
+        json,
+        threshold,
+    );
     println!("{text}");
     Ok(())
 }
