@@ -191,20 +191,23 @@ spots - lives in [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
 | field | classes | rows | top-1 | top-3 |
 |-------|---------|------|-------|-------|
-| compiler_family | 2 | 1359 | 1.0000 | 1.0000 |
-| compiler_version | 2 | 1359 | 1.0000 | 1.0000 |
-| opt_level | 6 | 1359 | 0.8971 | 0.9926 |
-| arch | 4 | 1359 | 1.0000 | 1.0000 |
-| os | 3 | 1359 | 1.0000 | 1.0000 |
-| abi | 3 | 1359 | 0.9816 | 1.0000 |
-| pie | 3 | 1359 | 0.9963 | 1.0000 |
-| lto | 2 | 1359 | 0.9632 | 1.0000 |
-| static | 3 | 1359 | 0.9890 | 1.0000 |
+| compiler_family | 2 | 1389 | 1.0000 | 1.0000 |
+| compiler_version | 2 | 1389 | 1.0000 | 1.0000 |
+| opt_level | 6 | 1389 | 0.8561 | 0.9964 |
+| arch | 4 | 1389 | 1.0000 | 1.0000 |
+| os | 3 | 1389 | 0.9964 | 1.0000 |
+| abi | 3 | 1389 | 0.9568 | 1.0000 |
+| pie | 3 | 1389 | 0.9928 | 1.0000 |
+| lto | 2 | 1389 | 0.8273 | 1.0000 |
+| static | 3 | 1389 | 0.9424 | 1.0000 |
+| hardening | 2 | 1389 | 0.9281 | 1.0000 |
 
 `arch` covers x86-64, aarch64, riscv64, and arm32; `os` separates ELF
-Linux, PE Windows, and Mach-O macOS. `lto` sits at its majority baseline
-until the matrix gains more LTO-built rows, and `opt_level`'s confusion is
-concentrated in O2/O3 pairs.
+Linux, PE Windows, and Mach-O macOS; `hardening` detects the
+stack-protector/fortify/CET build flavor. `lto` and `hardening` are the
+skewed axes (48 and 30 rows against the majority) - the class-weighted fit
+beats their baselines, and their macro-F1 says so honestly. `opt_level`'s
+confusion is concentrated in O2/O3 pairs.
 
 Because a confident wrong answer is the worst outcome, `classify` flags
 abstention: any field whose top prediction falls below the confidence

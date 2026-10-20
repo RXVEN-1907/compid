@@ -54,7 +54,8 @@ BUILD_TIMEOUT = 10  # seconds, per build
 
 MANIFEST_COLUMNS = [
     "build_id", "source_id", "toolchain", "compiler_family", "compiler_version",
-    "opt_level", "arch", "os", "abi", "pie", "lto", "static", "path", "sha256",
+    "opt_level", "arch", "os", "abi", "pie", "lto", "static", "hardening",
+    "path", "sha256",
 ]
 FAILURE_COLUMNS = ["build_id", "toolchain", "target", "reason", "stderr_tail"]
 
@@ -161,7 +162,7 @@ def build_plan(toolchains):
     cxx_srcs = [(sid, path, lang) for sid, path, lang in sources if lang == "cxx"]
     jobs = []
 
-    def add(tc_name, target, opt, pie, lto, static, src_path, lang):
+    def add(tc_name, target, opt, pie, lto, static, src_path, lang, hardening="none"):
         tc = tcs[tc_name]
         arch, osname, abi = target_labels(target)
         src_id = src_path.stem
@@ -170,7 +171,10 @@ def build_plan(toolchains):
             "lto": "lto" if lto == "on" else "nolto",
             "static": "st" if static == "static" else "dyn",
         }
-        build_id = f"{src_id}-{tc_name}-{target}-{opt}-{tags['pie']}-{tags['lto']}-{tags['static']}"
+        if hardening != "none":
+            tags["hardening"] = "hard"
+        tag_order = ["pie", "lto", "static"] + (["hardening"] if "hardening" in tags else [])
+        build_id = f"{src_id}-{tc_name}-{target}-{opt}-" + "-".join(tags[t] for t in tag_order)
         out_path = BINARIES / build_id
         if tc.family == "clang":
             cc_prefix = list(tc.cc if lang == "c" else tc.cxx)
@@ -189,6 +193,10 @@ def build_plan(toolchains):
             cmd += ["-flto"]
         if static == "static":
             cmd += ["-static"]
+        if hardening == "hardened":
+            # Modern-distribution default hardening: stack protector, glibc
+            # _FORTIFY_SOURCE wrappers, and Intel CET endbr64 instrumentation.
+            cmd += ["-fstack-protector-all", "-D_FORTIFY_SOURCE=2", "-fcf-protection=full"]
         # -lm goes after the source: the linker resolves libraries in order,
         # so libm must come once the objects that need it are on the line.
         cmd += ["-o", str(out_path), str(src_path)] + MATH_FLAGS
@@ -203,6 +211,7 @@ def build_plan(toolchains):
             "pie_cmd": pie,
             "lto": lto,
             "static_cmd": static,
+            "hardening": hardening,
             "arch": arch,
             "os": osname,
             "abi": abi,
@@ -223,9 +232,16 @@ def build_plan(toolchains):
             if i % 4 == 2:
                 for opt in GCC_STATIC_OPTS:
                     add("gcc13", "x86_64-linux-gnu", opt, "no-pie", "off", "static", path, "c")
-        for sid, path, lang in cxx_srcs:
+            if i % 4 == 0:
+                for opt in ("O0", "O2"):
+                    add("gcc13", "x86_64-linux-gnu", opt, "pie", "off", "dyn", path, "c",
+                        hardening="hardened")
+        for i, (sid, path, lang) in enumerate(cxx_srcs):
             for opt in CXX_OPTS:
                 add("gcc13", "x86_64-linux-gnu", opt, "pie", "off", "dyn", path, lang)
+            if i % 2 == 0:
+                add("gcc13", "x86_64-linux-gnu", "O2", "pie", "off", "dyn", path, lang,
+                    hardening="hardened")
 
     if "zig-cc" in tcs:
         for sid, path in c_srcs:
@@ -474,6 +490,7 @@ def main():
                     "pie": pie,
                     "lto": job["lto"],
                     "static": static,
+                    "hardening": job.get("hardening", "none"),
                     "path": str(job["out_path"].relative_to(REPO)),
                     "sha256": sha256_file(job["out_path"]),
                 })

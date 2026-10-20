@@ -330,6 +330,7 @@ fn cmd_dataset_info(manifest_path: &Path) -> Result<()> {
                 "pie" => row.pie.as_str(),
                 "lto" => row.lto.as_str(),
                 "static" => row.static_linking.as_str(),
+                "hardening" => row.hardening.as_str(),
                 _ => unreachable!("LABEL_COLUMNS are fixed"),
             };
             *counts.entry(value).or_insert(0) += 1;
@@ -381,6 +382,7 @@ fn cmd_batch(manifest_path: &Path, out: Option<&Path>) -> Result<()> {
                     pie: row.pie.clone(),
                     lto: row.lto.clone(),
                     static_linking: row.static_linking.clone(),
+                    hardening: row.hardening.clone(),
                 };
                 let line =
                     serde_json::to_string(&ef).context("feature JSON serialization failed")?;
@@ -642,6 +644,7 @@ fn cmd_functions_batch(manifest_path: &Path, out: Option<&Path>, features: bool)
             pie: row.pie.clone(),
             lto: row.lto.clone(),
             static_linking: row.static_linking.clone(),
+            hardening: row.hardening.clone(),
         };
 
         if features {

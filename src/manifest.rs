@@ -3,7 +3,7 @@
 //! The corpus manifest is a single CSV with a fixed header:
 //!
 //! ```text
-//! build_id,source_id,toolchain,compiler_family,compiler_version,opt_level,arch,os,abi,pie,lto,static,path,sha256
+//! build_id,source_id,toolchain,compiler_family,compiler_version,opt_level,arch,os,abi,pie,lto,static,hardening,path,sha256
 //! ```
 //!
 //! The parser below handles RFC-4180-style quoting (`"a,b"` and `""`
@@ -26,6 +26,7 @@ pub const MANIFEST_COLUMNS: &[&str] = &[
     "pie",
     "lto",
     "static",
+    "hardening",
     "path",
     "sha256",
 ];
@@ -41,6 +42,7 @@ pub const LABEL_COLUMNS: &[&str] = &[
     "pie",
     "lto",
     "static",
+    "hardening",
 ];
 
 /// One parsed manifest row. Missing cells read as "unknown".
@@ -58,6 +60,7 @@ pub struct ManifestRow {
     pub pie: String,
     pub lto: String,
     pub static_linking: String,
+    pub hardening: String,
     pub path: String,
     pub sha256: String,
 }
@@ -86,6 +89,7 @@ impl ManifestRow {
             pie: get("pie"),
             lto: get("lto"),
             static_linking: get("static"),
+            hardening: get("hardening"),
             path: get("path"),
             sha256: get("sha256"),
         }

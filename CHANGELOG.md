@@ -5,6 +5,17 @@ All notable changes to compid are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Hardened-build axis and hardening detection: the corpus gains 30 builds
+  compiled with `-fstack-protector-all`, `-D_FORTIFY_SOURCE=2`, and
+  `-fcf-protection=full` (new `hardening` manifest column), and the
+  class-weighted retrain learns a tenth field - `hardening` classifies at
+  0.9281 top-1 against a 0.978 majority baseline. Both trainers now fit
+  class-weighted by default (`--no-balanced` to disable) so skewed axes
+  survive their majority priors.
 - Abstention signal in `compid classify`: fields whose top prediction
   falls below the confidence threshold (default 0.6, `--confidence-threshold`
   to tune, 0 to disable) print a `[low confidence]` marker in the table and

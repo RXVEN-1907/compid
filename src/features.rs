@@ -52,6 +52,15 @@ pub struct Labels {
     pub lto: String,
     #[serde(rename = "static")]
     pub static_linking: String,
+    /// Hardened-build flag axis from the manifest; the extractor's own
+    /// best-effort labels carry "n/a" because hardening is a build flag,
+    /// not something read off the container.
+    #[serde(default = "default_hardening")]
+    pub hardening: String,
+}
+
+fn default_hardening() -> String {
+    "n/a".to_string()
 }
 
 /// One extracted binary: provenance labels plus its feature vector.
@@ -82,6 +91,7 @@ impl Labels {
     pub fn from_elf(info: &ElfInfo) -> Labels {
         let l = &info.labels;
         Labels {
+            hardening: "n/a".to_string(),
             compiler_family: l.compiler_family.clone(),
             compiler_version: l.compiler_version.clone(),
             opt_level: l.opt_level.clone(),
@@ -98,6 +108,7 @@ impl Labels {
     pub fn from_pe(info: &PeInfo) -> Labels {
         let l = &info.labels;
         Labels {
+            hardening: "n/a".to_string(),
             compiler_family: l.compiler_family.clone(),
             compiler_version: l.compiler_version.clone(),
             opt_level: l.opt_level.clone(),
@@ -114,6 +125,7 @@ impl Labels {
     pub fn from_macho(info: &MachoInfo) -> Labels {
         let l = &info.labels;
         Labels {
+            hardening: "n/a".to_string(),
             compiler_family: l.compiler_family.clone(),
             compiler_version: l.compiler_version.clone(),
             opt_level: l.opt_level.clone(),

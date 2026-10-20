@@ -36,7 +36,7 @@ $ ./target/release/compid functions-batch dataset/manifest.csv --out dataset/fea
 `dataset/manifest.csv` is a UTF-8 CSV whose header is exactly:
 
 ```csv
-build_id,source_id,toolchain,compiler_family,compiler_version,opt_level,arch,os,abi,pie,lto,static,path,sha256
+build_id,source_id,toolchain,compiler_family,compiler_version,opt_level,arch,os,abi,pie,lto,static,hardening,path,sha256
 ```
 
 | column            | meaning                                                                 |

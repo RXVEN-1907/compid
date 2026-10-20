@@ -41,6 +41,14 @@ feeding it new builds weekly.
 
 ## Done
 
+### Hardened-build axis and hardening detection
+
+The matrix gained 30 hardened builds (`-fstack-protector-all`,
+`-D_FORTIFY_SOURCE=2`, `-fcf-protection=full` on a gcc slice, recorded in a
+`hardening` manifest column), and the retrained model learns a tenth field:
+`hardening` at 0.9281 top-1 against a 0.978 majority baseline. Both trainers
+fit class-weighted by default now.
+
 ### macOS dataset rows
 
 The extractor parses 64-bit Mach-O images (x86-64 and arm64), maps `sec:`

@@ -63,6 +63,7 @@ LABEL_COLUMNS = [
     "pie",
     "lto",
     "static",
+    "hardening",
 ]
 
 MODEL_FORMAT = "compid-model/v1"
@@ -214,14 +215,19 @@ def fit_field(field: str, classes: list[str], dicts: list[dict], y: list[str], a
         stratify=y_idx_all,
     )
 
-    clf = LogisticRegression(max_iter=args.max_iter, C=args.C)
+    # Class-weighted by default: skewed axes (e.g. 30 hardened rows against
+    # 1300+ unhardened) would otherwise be swallowed by the majority prior.
+    # --no-balanced restores the plain fit.
+    weights = None if getattr(args, "no_balanced", False) else "balanced"
+
+    clf = LogisticRegression(max_iter=args.max_iter, C=args.C, class_weight=weights)
     with warnings.catch_warnings():
         warnings.simplefilter("error", ConvergenceWarning)
         try:
             clf.fit(x_all[idx_train], y_idx_all[idx_train])
         except ConvergenceWarning:
             log(f"  {field}: hit max_iter; keeping the fit and continuing")
-            clf = LogisticRegression(max_iter=args.max_iter, C=args.C)
+            clf = LogisticRegression(max_iter=args.max_iter, C=args.C, class_weight=weights)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", ConvergenceWarning)
                 clf.fit(x_all[idx_train], y_idx_all[idx_train])
@@ -299,6 +305,7 @@ def main() -> int:
     ap.add_argument("--random-state", type=int, default=42, help="split seed (default: %(default)s)")
     ap.add_argument("--max-iter", type=int, default=3000, help="LogisticRegression max_iter (default: %(default)s)")
     ap.add_argument("--C", type=float, default=4.0, help="LogisticRegression inverse regularization (default: %(default)s)")
+    ap.add_argument("--no-balanced", action="store_true", help="disable class-weighted fitting (default: class_weight=balanced)")
     ap.add_argument("--limit", type=int, default=None, metavar="N",
                     help="use only the first N manifest rows (smoke runs)")
     args = ap.parse_args()
