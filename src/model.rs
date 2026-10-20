@@ -30,6 +30,22 @@ pub struct FieldModel {
     pub coef: Vec<Vec<f64>>,
 }
 
+/// Optional provenance block: ties a model back to the exact dataset it was
+/// fitted on, so a user can tell how fresh the model they are running is.
+/// Whole models trained before provenance was introduced lack the block;
+/// every field is individually optional for the same reason.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Provenance {
+    #[serde(default)]
+    pub manifest_rows: Option<u64>,
+    #[serde(default)]
+    pub manifest_sha256: Option<String>,
+    #[serde(default)]
+    pub features_rows: Option<u64>,
+    #[serde(default)]
+    pub features_sha256: Option<String>,
+}
+
 /// A full trained model.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Model {
@@ -39,12 +55,28 @@ pub struct Model {
     /// Ordered feature names; coefficient rows are indexed against this.
     pub features: Vec<String>,
     pub fields: BTreeMap<String, FieldModel>,
+    #[serde(default)]
+    pub provenance: Option<Provenance>,
 
     #[serde(skip)]
     index: HashMap<String, usize>,
 }
 
 impl Model {
+    /// One-line summary for report headers: what the model is and, when the
+    /// provenance block is present, how much data stands behind it.
+    pub fn header_line(&self) -> String {
+        match self.provenance.as_ref().and_then(|p| p.manifest_rows) {
+            Some(rows) => format!(
+                "trained {} over {} builds, {} features",
+                self.created,
+                rows,
+                self.features.len()
+            ),
+            None => format!("trained {}, {} features", self.created, self.features.len()),
+        }
+    }
+
     /// Load and validate a model file from disk.
     pub fn load(path: &Path) -> Result<Model> {
         if !path.exists() {

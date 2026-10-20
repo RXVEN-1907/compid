@@ -9,8 +9,7 @@ use std::collections::BTreeMap;
 pub fn classification(
     bin: &std::path::Path,
     model_path: &std::path::Path,
-    model_created: &str,
-    feature_count: usize,
+    model_header: &str,
     ef: &ExtractedFeatures,
     pred: &Prediction,
     json: bool,
@@ -23,10 +22,9 @@ pub fn classification(
     let mut out = String::new();
     out.push_str(&format!("binary: {}\n", bin.display()));
     out.push_str(&format!(
-        "model:   {} (trained {created}, {n} features)\n",
+        "model:   {} ({})\n",
         model_path.display(),
-        created = model_created,
-        n = feature_count,
+        model_header
     ));
     if ef.build_id != "none" {
         out.push_str(&format!("build-id: {}\n", ef.build_id));
@@ -167,7 +165,7 @@ pub fn function_provenance(
     bin: &std::path::Path,
     build_id: &str,
     reason: Option<&str>,
-    model: Option<(&std::path::Path, &str, usize)>,
+    model: Option<(&std::path::Path, &str)>,
     rows: &[FunctionRow],
 ) -> String {
     let mut out = String::new();
@@ -175,11 +173,8 @@ pub fn function_provenance(
     if build_id != "none" {
         out.push_str(&format!("build-id: {build_id}\n"));
     }
-    if let Some((path, created, n)) = model {
-        out.push_str(&format!(
-            "model:   {} (trained {created}, {n} features)\n",
-            path.display()
-        ));
+    if let Some((path, header)) = model {
+        out.push_str(&format!("model:   {} ({})\n", path.display(), header));
     }
     if rows.is_empty() {
         out.push_str(&match reason {
@@ -317,7 +312,10 @@ mod tests {
             Path::new("mixed-demo"),
             "d1294f",
             None,
-            Some((Path::new("model/functions.json"), "2026-10-20", 3121)),
+            Some((
+                Path::new("model/functions.json"),
+                "trained 2026-10-20, 3121 features",
+            )),
             &demo_rows(),
         );
         assert!(text.contains("binary: mixed-demo"));

@@ -93,6 +93,14 @@ with itself is the trivially correct case; values near `0` mean unrelated
 builds. Useful against a reference build you trust: a sharp drop in
 similarity after a toolchain bump is exactly the kind of change this catches.
 
+## compid model-info
+
+    compid model-info [--model PATH]
+
+Describe a trained model: format, the header line classify uses, every
+field with its classes, and the provenance block (manifest row count and
+sha256, feature row count and sha256) when the trainer recorded one.
+
 ## compid dataset-info
 
 ```text

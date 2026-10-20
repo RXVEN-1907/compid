@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Model provenance and `compid model-info`: trained models now carry a
+  provenance block (manifest row count and sha256, features row count and
+  sha256), `compid model-info` prints the fields, classes, and provenance
+  of any model file, and classify/function headers state how many builds
+  stand behind the model.
 - Function-level provenance for unstripped ELF binaries: `compid functions
   <BIN>` enumerates functions from the ELF symbol table (SHT_SYMTAB,
   STT_FUNC with a size, deduplicated by address and size, raw names;

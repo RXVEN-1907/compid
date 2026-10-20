@@ -119,3 +119,22 @@ mismatches between the two versions are flagged, not guessed around.
   the Rust reader in the same change.
 - Adding rows to the dataset changes none of the above - data is not format.
   Retrain and commit the refreshed model.
+
+### Provenance block
+
+Trainers since provenance was introduced also write a `provenance` object so
+a user can tell how fresh a model is and tie it back to its dataset:
+
+```json
+"provenance": {
+  "manifest_rows": 1359,
+  "manifest_sha256": "f7078512...",
+  "features_rows": 1359,
+  "features_sha256": "78a9ae95..."
+}
+```
+
+Every field is individually optional and the whole block is optional: the
+Rust reader treats it as metadata only, and `compid model-info` renders it.
+`manifest_sha256` matches `dataset/manifest.csv` exactly as committed;
+`features_sha256` matches the uncompressed features file.

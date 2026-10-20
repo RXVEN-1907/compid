@@ -361,12 +361,22 @@ def main() -> int:
         )
         report_rows.append({**payload, "n": len(y), "skipped": False})
 
+    manifest_rows = sum(1 for _ in open(MANIFEST, encoding="utf-8")) - 1
     model = {
         "format": MODEL_FORMAT,
         "feature_version": FEATURE_VERSION,
         "created": date.today().isoformat(),
         "features": sorted(vocab),
         "fields": {name: fields_payload[name] for name in sorted(fields_payload)},
+        # Provenance: lets a user tell how fresh the model they are running
+        # is, and tie it back to the exact dataset it was fitted on. The
+        # Rust reader treats the whole block as optional.
+        "provenance": {
+            "manifest_rows": manifest_rows,
+            "manifest_sha256": sha256_of(MANIFEST),
+            "features_rows": len(records),
+            "features_sha256": sha256_of(args.features_in) if args.features_in else None,
+        },
     }
     args.model_out.parent.mkdir(parents=True, exist_ok=True)
     with args.model_out.open("w", encoding="utf-8") as f:

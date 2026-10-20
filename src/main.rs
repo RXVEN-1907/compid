@@ -115,6 +115,12 @@ enum Cmd {
         #[arg(long)]
         features: bool,
     },
+    /// Describe a model file: fields, classes, and dataset provenance
+    ModelInfo {
+        /// Trained model file to describe
+        #[arg(long, value_name = "FILE", default_value = "model/model.json")]
+        model: PathBuf,
+    },
     /// Print a shell completion script to stdout (hidden from --help)
     #[command(hide = true)]
     Completions {
@@ -163,8 +169,43 @@ fn run(cmd: Cmd) -> Result<()> {
             out,
             features,
         } => cmd_functions_batch(&manifest, out.as_deref(), features),
+        Cmd::ModelInfo { model } => cmd_model_info(&model),
         Cmd::Completions { shell } => cmd_completions(shell),
     }
+}
+
+/// Describe a model file: format, fields with their classes, and — when the
+/// trainer recorded it — the dataset provenance block.
+fn cmd_model_info(model_path: &Path) -> Result<()> {
+    let m = load_model(model_path)?;
+    println!("model:    {}", model_path.display());
+    println!(
+        "format:   {} (feature_version {})",
+        m.format, m.feature_version
+    );
+    println!("{}", m.header_line());
+    println!("fields:   {}", m.fields.len());
+    for (name, field) in &m.fields {
+        println!("  {name}: {}", field.classes.join(", "));
+    }
+    if let Some(p) = &m.provenance {
+        println!("provenance:");
+        if let Some(rows) = p.manifest_rows {
+            println!("  manifest rows:     {rows}");
+        }
+        if let Some(sha) = &p.manifest_sha256 {
+            println!("  manifest sha256:   {sha}");
+        }
+        if let Some(rows) = p.features_rows {
+            println!("  feature rows:      {rows}");
+        }
+        if let Some(sha) = &p.features_sha256 {
+            println!("  features sha256:   {sha}");
+        }
+    } else {
+        println!("provenance: none (model predates the provenance block)");
+    }
+    Ok(())
 }
 
 /// Write the completion script for one shell to stdout. The script covers
@@ -211,15 +252,7 @@ fn cmd_classify(bin: &Path, model_path: &Path, json: bool) -> Result<()> {
     let m = load_model(model_path)?;
     let ef = extract_binary(bin)?;
     let pred = m.predict(&ef.features);
-    let text = report::classification(
-        bin,
-        model_path,
-        &m.created,
-        m.features.len(),
-        &ef,
-        &pred,
-        json,
-    );
+    let text = report::classification(bin, model_path, &m.header_line(), &ef, &pred, json);
     println!("{text}");
     Ok(())
 }
@@ -435,9 +468,12 @@ fn cmd_functions(
     };
 
     let model_line = match (&m, model_path) {
-        (Some(m), Some(p)) => Some((p, m.created.as_str(), m.features.len())),
+        (Some(m), Some(p)) => Some((p, m.header_line())),
         _ => None,
     };
+    let model_line = model_line
+        .as_ref()
+        .map(|(p, h)| (std::path::Path::new(p), h.as_str()));
     let text =
         report::function_provenance(bin, &ex.build_id, ex.reason.as_deref(), model_line, &rows);
     println!("{text}");
