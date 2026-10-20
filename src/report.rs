@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 #[allow(clippy::too_many_arguments)]
 pub fn classification(
     bin: &std::path::Path,
-    model_path: &std::path::Path,
+    model_ref: &str,
     model_header: &str,
     ef: &ExtractedFeatures,
     pred: &Prediction,
@@ -53,7 +53,7 @@ pub fn classification(
     out.push_str(&format!(
         "{}{}\n",
         paint.bold("model:   "),
-        paint.dim(&format!("{} ({})", model_path.display(), model_header)),
+        paint.dim(&format!("{} ({})", model_ref, model_header)),
     ));
     if ef.build_id != "none" {
         out.push_str(&paint.dim(&format!("build-id: {}\n", ef.build_id)));
@@ -204,7 +204,7 @@ pub const EXCERPT_FIELDS: usize = 4;
 #[allow(clippy::too_many_arguments)]
 pub fn report_screen(
     bin: &std::path::Path,
-    model_path: &std::path::Path,
+    model_ref: &str,
     model_header: &str,
     provenance: Option<&crate::model::Provenance>,
     ef: &ExtractedFeatures,
@@ -218,7 +218,7 @@ pub fn report_screen(
         // low-confidence flags) rather than re-deriving it.
         let classification_json = classification(
             bin,
-            model_path,
+            model_ref,
             model_header,
             ef,
             pred,
@@ -230,7 +230,7 @@ pub fn report_screen(
             .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
         let obj = serde_json::json!({
             "binary": bin.display().to_string(),
-            "model": model_path.display().to_string(),
+            "model": model_ref,
             "model_header": model_header,
             "build_id": ef.build_id,
             "classification": value,
@@ -242,7 +242,7 @@ pub fn report_screen(
 
     let mut out = classification(
         bin,
-        model_path,
+        model_ref,
         model_header,
         ef,
         pred,
@@ -722,7 +722,7 @@ mod color_tests {
     fn classification_plain_output_is_byte_stable() {
         let text = classification(
             Path::new("/tmp/sample"),
-            Path::new("model/model.json"),
+            "model/model.json",
             "trained 2026-10-20, 68352 features",
             &demo_features(),
             &demo_prediction(),
@@ -752,7 +752,7 @@ mod color_tests {
     fn classification_colored_output_carries_the_palette() {
         let text = classification(
             Path::new("/tmp/sample"),
-            Path::new("model/model.json"),
+            "model/model.json",
             "trained 2026-10-20, 68352 features",
             &demo_features(),
             &demo_prediction(),
@@ -780,7 +780,7 @@ mod color_tests {
         let stripped = strip_ansi(&text).replace('\u{2588}', "#");
         let plain = classification(
             Path::new("/tmp/sample"),
-            Path::new("model/model.json"),
+            "model/model.json",
             "trained 2026-10-20, 68352 features",
             &demo_features(),
             &demo_prediction(),
@@ -844,7 +844,7 @@ mod color_tests {
         };
         let text = report_screen(
             Path::new("/tmp/sample"),
-            Path::new("model/model.json"),
+            "model/model.json",
             "trained 2026-10-20, 68352 features",
             Some(&provenance),
             &demo_features(),
@@ -875,7 +875,7 @@ mod color_tests {
     fn report_screen_colored_marks_the_sections() {
         let text = report_screen(
             Path::new("/tmp/sample"),
-            Path::new("model/model.json"),
+            "model/model.json",
             "trained 2026-10-20, 68352 features",
             None,
             &demo_features(),
@@ -903,7 +903,7 @@ mod color_tests {
         };
         let text = report_screen(
             Path::new("/tmp/sample"),
-            Path::new("model/model.json"),
+            "model/model.json",
             "trained 2026-10-20, 68352 features",
             Some(&provenance),
             &demo_features(),

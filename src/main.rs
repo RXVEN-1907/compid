@@ -54,9 +54,10 @@ enum Cmd {
     Classify {
         /// Path to an ELF, PE, or Mach-O binary
         bin: PathBuf,
-        /// Trained model file
-        #[arg(long, value_name = "FILE", default_value = "model/model.json")]
-        model: PathBuf,
+        /// Trained model file (default: ./model/model.json, else the model
+        /// embedded at build time)
+        #[arg(long, value_name = "FILE")]
+        model: Option<PathBuf>,
         /// Emit machine-readable JSON instead of a table
         #[arg(long)]
         json: bool,
@@ -72,9 +73,10 @@ enum Cmd {
     Explain {
         /// Path to an ELF, PE, or Mach-O binary
         bin: PathBuf,
-        /// Trained model file
-        #[arg(long, value_name = "FILE", default_value = "model/model.json")]
-        model: PathBuf,
+        /// Trained model file (default: ./model/model.json, else the model
+        /// embedded at build time)
+        #[arg(long, value_name = "FILE")]
+        model: Option<PathBuf>,
         /// Emit machine-readable JSON instead of text
         #[arg(long)]
         json: bool,
@@ -107,9 +109,13 @@ enum Cmd {
     Functions {
         /// Path to an ELF, PE, or Mach-O binary (formats without a symbol source report a reason)
         bin: PathBuf,
-        /// Trained per-function model; omit it for a plain function listing
+        /// Trained per-function model (default: ./model/functions.json, else
+        /// the model embedded at build time)
         #[arg(long, value_name = "FILE")]
         model: Option<PathBuf>,
+        /// List functions without per-function predictions
+        #[arg(long)]
+        no_model: bool,
         /// Write per-function training features (JSONL) here instead of the table
         #[arg(long, value_name = "FILE")]
         features: Option<PathBuf>,
@@ -137,17 +143,19 @@ enum Cmd {
     },
     /// Describe a model file: fields, classes, and dataset provenance
     ModelInfo {
-        /// Trained model file to describe
-        #[arg(long, value_name = "FILE", default_value = "model/model.json")]
-        model: PathBuf,
+        /// Trained model file to describe (default: ./model/model.json, else
+        /// the model embedded at build time)
+        #[arg(long, value_name = "FILE")]
+        model: Option<PathBuf>,
     },
     /// One screen: classification, top contributors, and model provenance
     Report {
         /// Path to an ELF, PE, or Mach-O binary
         bin: PathBuf,
-        /// Trained model file
-        #[arg(long, value_name = "FILE", default_value = "model/model.json")]
-        model: PathBuf,
+        /// Trained model file (default: ./model/model.json, else the model
+        /// embedded at build time)
+        #[arg(long, value_name = "FILE")]
+        model: Option<PathBuf>,
         /// Emit machine-readable JSON instead of a table
         #[arg(long)]
         json: bool,
@@ -181,6 +189,13 @@ enum CompletionShell {
 }
 
 fn main() {
+    // Rust ignores SIGPIPE by default, which turns `compid ... | head` into
+    // a panic when head closes the pipe; restore the default disposition so
+    // the process just dies silently, like every other unix filter.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     if let Err(e) = run(cli.cmd) {
         eprintln!("error: {e:#}");
@@ -197,13 +212,13 @@ fn run(cmd: Cmd) -> Result<()> {
             json,
             confidence_threshold,
             color,
-        } => cmd_classify(&bin, &model, json, confidence_threshold, color),
+        } => cmd_classify(&bin, model.as_deref(), json, confidence_threshold, color),
         Cmd::Explain {
             bin,
             model,
             json,
             color,
-        } => cmd_explain(&bin, &model, json, color),
+        } => cmd_explain(&bin, model.as_deref(), json, color),
         Cmd::Compare { a, b } => cmd_compare(&a, &b),
         Cmd::DatasetInfo { manifest } => cmd_dataset_info(&manifest),
         Cmd::Batch { manifest, out } => cmd_batch(&manifest, out.as_deref()),
@@ -211,6 +226,7 @@ fn run(cmd: Cmd) -> Result<()> {
             bin,
             model,
             features,
+            no_model,
             json,
             measure,
             color,
@@ -218,30 +234,37 @@ fn run(cmd: Cmd) -> Result<()> {
             if measure {
                 return cmd_functions_measure(&bin, json);
             }
-            cmd_functions(&bin, model.as_deref(), features.as_deref(), json, color)
+            cmd_functions(
+                &bin,
+                model.as_deref(),
+                no_model,
+                features.as_deref(),
+                json,
+                color,
+            )
         }
         Cmd::FunctionsBatch {
             manifest,
             out,
             features,
         } => cmd_functions_batch(&manifest, out.as_deref(), features),
-        Cmd::ModelInfo { model } => cmd_model_info(&model),
+        Cmd::ModelInfo { model } => cmd_model_info(model.as_deref()),
         Cmd::Report {
             bin,
             model,
             json,
             confidence_threshold,
             color,
-        } => cmd_report(&bin, &model, json, confidence_threshold, color),
+        } => cmd_report(&bin, model.as_deref(), json, confidence_threshold, color),
         Cmd::Completions { shell } => cmd_completions(shell),
     }
 }
 
 /// Describe a model file: format, fields with their classes, and — when the
 /// trainer recorded it — the dataset provenance block.
-fn cmd_model_info(model_path: &Path) -> Result<()> {
-    let m = load_model(model_path)?;
-    println!("model:    {}", model_path.display());
+fn cmd_model_info(model_arg: Option<&Path>) -> Result<()> {
+    let (m, model_ref) = resolve_model(model_arg)?;
+    println!("model:    {model_ref}");
     println!(
         "format:   {} (feature_version {})",
         m.format, m.feature_version
@@ -307,13 +330,53 @@ fn cmd_extract(bin: &Path, out: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn load_model(path: &Path) -> Result<model::Model> {
-    model::Model::load(path)
+/// Where a resolved model came from, for display: a real path, or the
+/// build-time embed.
+const EMBEDDED_MODEL_LABEL: &str = "<embedded>";
+
+/// Resolution order for the whole-binary model: an explicitly passed
+/// --model must exist; the default is ./model/model.json when present,
+/// else the model embedded at build time (released binaries carry one,
+/// so classify works with nothing beside it). Returns the model and the
+/// string to show for it.
+fn resolve_model(explicit: Option<&Path>) -> Result<(model::Model, String)> {
+    const DEFAULT: &str = "model/model.json";
+    match explicit {
+        Some(p) => Ok((model::Model::load(p)?, p.display().to_string())),
+        None if Path::new(DEFAULT).exists() => {
+            let p = Path::new(DEFAULT);
+            Ok((model::Model::load(p)?, p.display().to_string()))
+        }
+        None => Ok((model::Model::embedded()?, EMBEDDED_MODEL_LABEL.to_string())),
+    }
+}
+
+/// Same resolution for the per-function model, with --no-model forcing a
+/// plain listing.
+fn resolve_functions_model(
+    explicit: Option<&Path>,
+    no_model: bool,
+) -> Result<Option<(model::Model, String)>> {
+    const DEFAULT: &str = "model/functions.json";
+    if no_model {
+        return Ok(None);
+    }
+    match explicit {
+        Some(p) => Ok(Some((model::Model::load(p)?, p.display().to_string()))),
+        None if Path::new(DEFAULT).exists() => {
+            let p = Path::new(DEFAULT);
+            Ok(Some((model::Model::load(p)?, p.display().to_string())))
+        }
+        None => Ok(Some((
+            model::Model::embedded_functions()?,
+            EMBEDDED_MODEL_LABEL.to_string(),
+        ))),
+    }
 }
 
 fn cmd_classify(
     bin: &Path,
-    model_path: &Path,
+    model_arg: Option<&Path>,
     json: bool,
     confidence_threshold: f64,
     color: term::ColorChoice,
@@ -322,13 +385,13 @@ fn cmd_classify(
         bail!("--confidence-threshold must be between 0 and 1");
     }
     let threshold = (confidence_threshold > 0.0).then_some(confidence_threshold);
-    let m = load_model(model_path)?;
+    let (m, model_ref) = resolve_model(model_arg)?;
     let ef = extract_binary(bin)?;
     let pred = m.predict(&ef.features);
     let paint = term::Painter::for_choice(color);
     let text = report::classification(
         bin,
-        model_path,
+        &model_ref,
         &m.header_line(),
         &ef,
         &pred,
@@ -340,8 +403,13 @@ fn cmd_classify(
     Ok(())
 }
 
-fn cmd_explain(bin: &Path, model_path: &Path, json: bool, color: term::ColorChoice) -> Result<()> {
-    let m = load_model(model_path)?;
+fn cmd_explain(
+    bin: &Path,
+    model_arg: Option<&Path>,
+    json: bool,
+    color: term::ColorChoice,
+) -> Result<()> {
+    let (m, _model_ref) = resolve_model(model_arg)?;
     let ef = extract_binary(bin)?;
     let pred = m.predict(&ef.features);
     let paint = term::Painter::for_choice(color);
@@ -354,7 +422,7 @@ fn cmd_explain(bin: &Path, model_path: &Path, json: bool, color: term::ColorChoi
 /// classify, rendered as one rich view by `report::report_screen`.
 fn cmd_report(
     bin: &Path,
-    model_path: &Path,
+    model_arg: Option<&Path>,
     json: bool,
     confidence_threshold: f64,
     color: term::ColorChoice,
@@ -363,13 +431,13 @@ fn cmd_report(
         bail!("--confidence-threshold must be between 0 and 1");
     }
     let threshold = (confidence_threshold > 0.0).then_some(confidence_threshold);
-    let m = load_model(model_path)?;
+    let (m, model_ref) = resolve_model(model_arg)?;
     let ef = extract_binary(bin)?;
     let pred = m.predict(&ef.features);
     let paint = term::Painter::for_choice(color);
     let text = report::report_screen(
         bin,
-        model_path,
+        &model_ref,
         &m.header_line(),
         m.provenance.as_ref(),
         &ef,
@@ -563,6 +631,7 @@ fn cmd_functions_measure(bin: &Path, json: bool) -> Result<()> {
 fn cmd_functions(
     bin: &Path,
     model_arg: Option<&Path>,
+    no_model: bool,
     features_out: Option<&Path>,
     json: bool,
     color: term::ColorChoice,
@@ -573,22 +642,14 @@ fn cmd_functions(
         return cmd_functions_features(&ex, path);
     }
 
-    // The default model path is used only when the file exists, so a plain
-    // `compid functions <BIN>` still lists functions on a fresh checkout; an
-    // explicitly passed --model that is missing stays a hard error.
-    let default_model = Path::new("model/functions.json");
-    let model_path: Option<&Path> = match model_arg {
-        Some(p) => Some(p),
-        None if default_model.exists() => Some(default_model),
-        None => None,
-    };
-    let m = match model_path {
-        Some(p) => Some(load_model(p)?),
-        None => None,
+    let resolved = resolve_functions_model(model_arg, no_model)?;
+    let (m, model_ref) = match resolved {
+        Some((m, r)) => (Some(m), r),
+        None => (None, String::new()),
     };
 
     if json {
-        let obj = functions_json(bin, model_path, &ex, m.as_ref())?;
+        let obj = functions_json(bin, m.as_ref().map(|_| model_ref.as_str()), &ex, m.as_ref())?;
         println!("{obj}");
         return Ok(());
     }
@@ -612,10 +673,7 @@ fn cmd_functions(
             .collect(),
     };
 
-    let model_line = match (&m, model_path) {
-        (Some(m), Some(p)) => Some((p, m.header_line())),
-        _ => None,
-    };
+    let model_line = m.as_ref().map(|m| (model_ref.as_str(), m.header_line()));
     let model_line = model_line
         .as_ref()
         .map(|(p, h)| (std::path::Path::new(p), h.as_str()));
@@ -672,7 +730,7 @@ fn cmd_functions_features(ex: &functions::FunctionsExtraction, path: &Path) -> R
 /// Machine-readable form of `compid functions`.
 fn functions_json(
     bin: &Path,
-    model_path: Option<&Path>,
+    model_ref: Option<&str>,
     ex: &functions::FunctionsExtraction,
     m: Option<&model::Model>,
 ) -> Result<String> {
@@ -708,7 +766,7 @@ fn functions_json(
 
     let obj = json!({
         "binary": bin.display().to_string(),
-        "model": model_path.map(|p| p.display().to_string()),
+        "model": model_ref,
         "build_id": ex.build_id,
         "source": ex.source,
         "reason": ex.reason,

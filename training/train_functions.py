@@ -39,6 +39,7 @@ numbers and their provenance regenerate together.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import sys
 import warnings
@@ -604,6 +605,14 @@ def main() -> int:
     args.model_out.parent.mkdir(parents=True, exist_ok=True)
     with args.model_out.open("w", encoding="utf-8") as f:
         json.dump(model, f, separators=(",", ":"))
+    # A compressed copy ships embedded in the CLI binary (src/model.rs
+    # include_bytes!); written with no gzip timestamp so rebuilds stay
+    # byte-reproducible.
+    gz_path = args.model_out.with_suffix(args.model_out.suffix + ".gz")
+    with gz_path.open("wb") as raw, gzip.GzipFile(
+        fileobj=raw, mode="wb", filename="", mtime=0, compresslevel=9
+    ) as gz:
+        gz.write(args.model_out.read_bytes())
     size_kb = args.model_out.stat().st_size / 1024
     log(
         f"wrote {args.model_out} ({size_kb:.0f} KiB, {len(model['features'])} features, "

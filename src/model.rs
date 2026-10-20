@@ -11,15 +11,33 @@
 //!
 //! The Python trainer writes the file; this module is the single reader.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::OnceLock;
 
 /// Format tag the reader enforces.
 pub const MODEL_FORMAT: &str = "compid-model/v1";
 /// Feature schema version the reader enforces.
 pub const FEATURE_VERSION: &str = "1";
+
+// Models embedded at build time: a released binary classifies with no files
+// beside it. The .gz copies are committed next to the plain files and kept
+// deterministic (no timestamp, level 9) by the trainers, which rewrite them
+// on every run. An explicit --model always wins over these fallbacks.
+static EMBEDDED_MODEL_GZ: &[u8] = include_bytes!("../model/model.json.gz");
+static EMBEDDED_FUNCTIONS_GZ: &[u8] = include_bytes!("../model/functions.json.gz");
+
+/// Decompress an embedded gzip model payload into its JSON text.
+fn embedded_text(bytes: &[u8], what: &str) -> Result<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(bytes)
+        .read_to_string(&mut text)
+        .with_context(|| format!("embedded {what} gzip payload is corrupt"))?;
+    Ok(text)
+}
 
 /// One label field's linear model: classes in fixed order, an intercept and
 /// a coefficient row per class.
@@ -88,6 +106,33 @@ impl Model {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read model file {}", path.display()))?;
         Self::parse(&text).with_context(|| format!("invalid model file {}", path.display()))
+    }
+
+    /// The whole-binary model embedded at build time (model/model.json.gz),
+    /// parsed once per process. This is what runs when no model file exists
+    /// beside the caller - the released binaries are self-contained.
+    pub fn embedded() -> Result<Model> {
+        static TEXT: OnceLock<Result<String, String>> = OnceLock::new();
+        let text = TEXT
+            .get_or_init(|| {
+                embedded_text(EMBEDDED_MODEL_GZ, "model.json").map_err(|e| format!("{e:#}"))
+            })
+            .as_ref()
+            .map_err(|e| anyhow!("{e}"))?;
+        Self::parse(text)
+    }
+
+    /// The per-function model embedded at build time
+    /// (model/functions.json.gz), same contract as [`Model::embedded`].
+    pub fn embedded_functions() -> Result<Model> {
+        static TEXT: OnceLock<Result<String, String>> = OnceLock::new();
+        let text = TEXT
+            .get_or_init(|| {
+                embedded_text(EMBEDDED_FUNCTIONS_GZ, "functions.json").map_err(|e| format!("{e:#}"))
+            })
+            .as_ref()
+            .map_err(|e| anyhow!("{e}"))?;
+        Self::parse(text)
     }
 
     /// Parse and validate a model from JSON text.
