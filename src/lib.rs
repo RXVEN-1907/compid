@@ -11,6 +11,7 @@
 
 pub mod elfinfo;
 pub mod features;
+pub mod functions;
 pub mod machoinfo;
 pub mod manifest;
 pub mod model;
@@ -41,6 +42,41 @@ pub fn extract_binary(path: &Path) -> Result<features::ExtractedFeatures> {
         match magic {
             mh::MH_MAGIC_64 | mh::MH_CIGAM_64 | mh::MH_MAGIC | mh::MH_CIGAM => {
                 features::extract_macho(&machoinfo::parse(data)?)
+            }
+            _ => bail!(
+                "{}: unsupported binary format (missing \\x7fELF, MZ, or Mach-O magic); \
+                 compid reads ELF, PE, and Mach-O",
+                path.display()
+            ),
+        }
+    } else {
+        bail!(
+            "{}: unsupported binary format (missing \\x7fELF, MZ, or Mach-O magic); \
+             compid reads ELF, PE, and Mach-O",
+            path.display()
+        );
+    }
+}
+
+/// Read a binary from disk and extract per-function features in one step.
+/// Same container detection as [`extract_binary`]. Function boundaries come
+/// from the ELF symbol table (unstripped ELF, and relocatable objects);
+/// PE and Mach-O yield an empty function list with a reason, and a stripped
+/// ELF does the same.
+pub fn extract_binary_functions(path: &Path) -> Result<functions::FunctionsExtraction> {
+    let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let data = std::sync::Arc::new(data);
+    if data.len() >= 4 && &data[0..4] == b"\x7fELF" {
+        Ok(functions::extract_elf(&elfinfo::parse(
+            std::sync::Arc::clone(&data),
+        )?))
+    } else if data.len() >= 2 && &data[0..2] == b"MZ" {
+        Ok(functions::extract_pe(&peinfo::parse(data)?))
+    } else if data.len() >= 4 {
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        match magic {
+            mh::MH_MAGIC_64 | mh::MH_CIGAM_64 | mh::MH_MAGIC | mh::MH_CIGAM => {
+                Ok(functions::extract_macho(&machoinfo::parse(data)?))
             }
             _ => bail!(
                 "{}: unsupported binary format (missing \\x7fELF, MZ, or Mach-O magic); \

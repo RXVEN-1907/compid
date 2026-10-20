@@ -10,6 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use goblin::elf::header as eh;
 use goblin::elf::section_header as sh;
 use goblin::Object;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// One section worth remembering: name, where its bytes live, how big it is.
@@ -39,6 +40,22 @@ pub struct ElfLabels {
     pub static_linking: String,
 }
 
+/// One function symbol lifted from the ELF symbol table (unstripped ELF
+/// only). `addr` is `st_value` exactly as the symbol table records it - a
+/// virtual address in a linked binary, an offset within the containing
+/// section in a relocatable object. `file_offset` is where the function's
+/// first byte sits in the file, resolved through the containing section;
+/// symbols whose range cannot be located (non-executable or out-of-bounds
+/// section) are never added to the list. Names are raw symbol-table strings,
+/// never demangled.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionSymbol {
+    pub name: String,
+    pub addr: u64,
+    pub size: u64,
+    pub file_offset: usize,
+}
+
 /// Everything feature extraction needs from one binary.
 #[derive(Debug, Clone)]
 pub struct ElfInfo {
@@ -49,6 +66,12 @@ pub struct ElfInfo {
     pub text: Option<Vec<u8>>,
     pub comment: Option<Vec<u8>>,
     pub sections: Vec<SectionInfo>,
+    /// Function symbols from the symbol table (empty for a stripped ELF or
+    /// an ELF whose symtab holds no usable functions).
+    pub functions: Vec<FunctionSymbol>,
+    /// true when the file carries an SHT_SYMTAB section at all; the
+    /// stripped-versus-no-functions distinction for error reporting.
+    pub has_symtab: bool,
     /// The whole file, kept so per-section bytes (entropy, and any section
     /// feature extraction wants) stay available without a re-read.
     file: std::sync::Arc<Vec<u8>>,
@@ -57,6 +80,13 @@ pub struct ElfInfo {
 impl ElfInfo {
     /// Copy of the file bytes for one section, clamped to the file extent.
     pub fn section_data(&self, offset: usize, size: u64) -> Vec<u8> {
+        self.file_slice(offset, size)
+    }
+
+    /// Copy of the file bytes for one `[offset, offset + size)` range,
+    /// clamped to the file extent. Function feature extraction reads each
+    /// function's bytes through this.
+    pub fn file_slice(&self, offset: usize, size: u64) -> Vec<u8> {
         let end = offset.saturating_add(size as usize).min(self.file.len());
         if offset >= end {
             Vec::new()
@@ -182,6 +212,11 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<ElfInfo> {
 
     let build_id = find_build_id(&data, &elf);
 
+    // Symbol `st_value` means different things in a relocatable object
+    // (section offset) and a linked binary (virtual address).
+    let is_rel = elf.header.e_type == eh::ET_REL;
+    let (functions, has_symtab) = enumerate_functions(&elf, is_rel);
+
     Ok(ElfInfo {
         labels: ElfLabels {
             compiler_family,
@@ -199,8 +234,72 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<ElfInfo> {
         text,
         comment,
         sections,
+        functions,
+        has_symtab,
         file: data,
     })
+}
+
+/// Collect STT_FUNC symbols with a nonzero size from the symbol table
+/// (SHT_SYMTAB, not the dynamic one), deduplicated by `(st_value, st_size)`,
+/// each resolved to a file offset through its containing executable
+/// section. In a relocatable object (`ET_REL`) `st_value` is an offset
+/// within the section; in a linked binary it is a virtual address matched
+/// against the section's `sh_addr`. Empty for a stripped ELF.
+fn enumerate_functions(elf: &goblin::elf::Elf, is_rel: bool) -> (Vec<FunctionSymbol>, bool) {
+    let has_symtab = elf
+        .section_headers
+        .iter()
+        .any(|hdr| hdr.sh_type == sh::SHT_SYMTAB);
+    if !has_symtab {
+        return (Vec::new(), false);
+    }
+
+    let mut functions: Vec<FunctionSymbol> = Vec::new();
+    let mut seen: HashSet<(u64, u64)> = HashSet::new();
+    for sym in elf.syms.iter() {
+        if !sym.is_function() || sym.st_size == 0 {
+            continue;
+        }
+        if !seen.insert((sym.st_value, sym.st_size)) {
+            continue; // same (address, size) range already listed
+        }
+        // Special section indexes (SHN_UNDEF, SHN_ABS, SHN_COMMON, ...)
+        // never name an executable section; the range check below also
+        // rejects them.
+        let shndx = sym.st_shndx;
+        if shndx == 0 || shndx >= elf.section_headers.len() {
+            continue;
+        }
+        let hdr = &elf.section_headers[shndx];
+        if hdr.sh_flags & u64::from(sh::SHF_EXECINSTR) == 0 {
+            continue;
+        }
+        let file_offset = if is_rel {
+            // st_value is the offset within the section.
+            hdr.sh_offset as usize + sym.st_value as usize
+        } else {
+            let lo = hdr.sh_addr;
+            let hi = lo.saturating_add(hdr.sh_size);
+            if sym.st_value >= lo && sym.st_value < hi {
+                hdr.sh_offset as usize + (sym.st_value - lo) as usize
+            } else {
+                continue;
+            }
+        };
+        let name = elf.strtab.get_at(sym.st_name).unwrap_or("").to_string();
+        if name.is_empty() {
+            continue;
+        }
+        functions.push(FunctionSymbol {
+            name,
+            addr: sym.st_value,
+            size: sym.st_size,
+            file_offset,
+        });
+    }
+    functions.sort_by(|a, b| a.addr.cmp(&b.addr).then_with(|| a.name.cmp(&b.name)));
+    (functions, has_symtab)
 }
 
 fn section_name_exists(elf: &goblin::elf::Elf, want: &str) -> bool {

@@ -76,6 +76,57 @@ impl ExtractedFeatures {
     }
 }
 
+impl Labels {
+    /// Labels as the ELF extractor reads them (opt_level stays "unknown";
+    /// the manifest is ground truth for training).
+    pub fn from_elf(info: &ElfInfo) -> Labels {
+        let l = &info.labels;
+        Labels {
+            compiler_family: l.compiler_family.clone(),
+            compiler_version: l.compiler_version.clone(),
+            opt_level: l.opt_level.clone(),
+            arch: l.arch.clone(),
+            os: l.os.clone(),
+            abi: l.abi.clone(),
+            pie: l.pie.clone(),
+            lto: l.lto.clone(),
+            static_linking: l.static_linking.clone(),
+        }
+    }
+
+    /// Labels as the PE extractor reads them.
+    pub fn from_pe(info: &PeInfo) -> Labels {
+        let l = &info.labels;
+        Labels {
+            compiler_family: l.compiler_family.clone(),
+            compiler_version: l.compiler_version.clone(),
+            opt_level: l.opt_level.clone(),
+            arch: l.arch.clone(),
+            os: l.os.clone(),
+            abi: l.abi.clone(),
+            pie: l.pie.clone(),
+            lto: l.lto.clone(),
+            static_linking: l.static_linking.clone(),
+        }
+    }
+
+    /// Labels as the Mach-O extractor reads them.
+    pub fn from_macho(info: &MachoInfo) -> Labels {
+        let l = &info.labels;
+        Labels {
+            compiler_family: l.compiler_family.clone(),
+            compiler_version: l.compiler_version.clone(),
+            opt_level: l.opt_level.clone(),
+            arch: l.arch.clone(),
+            os: l.os.clone(),
+            abi: l.abi.clone(),
+            pie: l.pie.clone(),
+            lto: l.lto.clone(),
+            static_linking: l.static_linking.clone(),
+        }
+    }
+}
+
 /// Borrowed, format-agnostic material one extraction pass consumes. Both
 /// [`ElfInfo`] and [`PeInfo`] project onto this, so the loop below is the
 /// single place n-grams, windows, geometry, and tokens are counted - which
@@ -166,7 +217,7 @@ pub fn extract(info: &ElfInfo) -> Result<ExtractedFeatures> {
     };
 
     Ok(extract_source(Source {
-        labels: labels_from(info),
+        labels: Labels::from_elf(info),
         build_id: &info.build_id,
         text,
         sections: &info.sections,
@@ -195,19 +246,8 @@ pub fn extract_pe(info: &PeInfo) -> Result<ExtractedFeatures> {
         ),
     };
 
-    let l = &info.labels;
     Ok(extract_source(Source {
-        labels: Labels {
-            compiler_family: l.compiler_family.clone(),
-            compiler_version: l.compiler_version.clone(),
-            opt_level: l.opt_level.clone(),
-            arch: l.arch.clone(),
-            os: l.os.clone(),
-            abi: l.abi.clone(),
-            pie: l.pie.clone(),
-            lto: l.lto.clone(),
-            static_linking: l.static_linking.clone(),
-        },
+        labels: Labels::from_pe(info),
         build_id: &info.build_id,
         text,
         sections: &info.sections,
@@ -239,19 +279,8 @@ pub fn extract_macho(info: &MachoInfo) -> Result<ExtractedFeatures> {
         ),
     };
 
-    let l = &info.labels;
     Ok(extract_source(Source {
-        labels: Labels {
-            compiler_family: l.compiler_family.clone(),
-            compiler_version: l.compiler_version.clone(),
-            opt_level: l.opt_level.clone(),
-            arch: l.arch.clone(),
-            os: l.os.clone(),
-            abi: l.abi.clone(),
-            pie: l.pie.clone(),
-            lto: l.lto.clone(),
-            static_linking: l.static_linking.clone(),
-        },
+        labels: Labels::from_macho(info),
         build_id: &info.build_id,
         text,
         sections: &info.sections,
@@ -264,21 +293,6 @@ pub fn extract_macho(info: &MachoInfo) -> Result<ExtractedFeatures> {
         meta_key: "meta:macos",
         disassemble: info.disassembles_x86_64(),
     }))
-}
-
-fn labels_from(info: &ElfInfo) -> Labels {
-    let l = &info.labels;
-    Labels {
-        compiler_family: l.compiler_family.clone(),
-        compiler_version: l.compiler_version.clone(),
-        opt_level: l.opt_level.clone(),
-        arch: l.arch.clone(),
-        os: l.os.clone(),
-        abi: l.abi.clone(),
-        pie: l.pie.clone(),
-        lto: l.lto.clone(),
-        static_linking: l.static_linking.clone(),
-    }
 }
 
 /// Mnemonic, register, and immediate counts from one 64-byte window, or
