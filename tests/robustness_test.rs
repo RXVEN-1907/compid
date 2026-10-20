@@ -92,7 +92,7 @@ use std::time::{Duration, Instant};
 /// panic/allowlist picture to change with it.
 const FUZZ_SEED: u64 = 0x434F_4D50_4944_3131; // "COMPID11", nonzero by construction
 
-/// Mutations generated per fixture. 37 committed fixtures x 88 = 3256
+/// Mutations generated per fixture. 38 committed fixtures x 88 = 3344
 /// cases, comfortably above the 3000-case bar; raise it to widen the
 /// sweep (earlier cases keep their meaning - see the module docs).
 const MUTATIONS_PER_FIXTURE: usize = 88;

@@ -161,6 +161,147 @@ fn macho_classify_runs_end_to_end_with_the_shipped_model() {
     );
 }
 
+/// The committed fixtures retain their symbol tables (zig keeps `LC_SYMTAB`
+/// unless told to strip), so `compid functions` enumerates real functions
+/// from them: defined, non-stab symbols in executable `__TEXT` sections,
+/// raw names with the ABI's leading underscore, sizes derived from the next
+/// symbol's value or the section end.
+#[test]
+fn macho_fixtures_enumerate_function_symbols() {
+    for path in macho_fixtures() {
+        let info = macho_load(&path);
+        assert!(
+            info.has_symtab,
+            "{} carries an LC_SYMTAB load command",
+            path.display()
+        );
+        assert!(
+            !info.functions.is_empty(),
+            "{} has usable function symbols",
+            path.display()
+        );
+
+        // Names are raw symbol-table strings: the macOS ABI's leading
+        // underscore stays, matching the raw-never-demangled convention.
+        assert!(
+            info.functions.iter().any(|f| f.name == "_main"),
+            "{} lists _main with its leading underscore",
+            path.display()
+        );
+
+        let ex = compid::functions::extract_macho(&info);
+        assert_eq!(
+            ex.source,
+            compid::functions::FunctionSource::SymbolTable,
+            "{} boundaries come from the symtab",
+            path.display()
+        );
+        assert!(
+            ex.reason.is_none(),
+            "{} extracts without a reason: {:?}",
+            path.display(),
+            ex.reason
+        );
+        assert_eq!(ex.functions.len(), info.functions.len());
+        for f in &ex.functions {
+            assert!(
+                f.size > 0,
+                "{}: {} carries a derived size",
+                path.display(),
+                f.name
+            );
+            assert!(
+                !f.features.is_empty(),
+                "{}: {} has features",
+                path.display(),
+                f.name
+            );
+            // The scoped namespaces: a size bucket always lands, byte
+            // n-grams run over the function's own bytes, and no
+            // container-only family leaks in.
+            assert!(
+                f.features.keys().any(|k| k.starts_with("fn:")),
+                "{}: {} carries an fn: bucket",
+                path.display(),
+                f.name
+            );
+            assert!(
+                f.features.keys().any(|k| k.starts_with("ng:")),
+                "{}: {} carries byte n-grams",
+                path.display(),
+                f.name
+            );
+            assert!(
+                !f.features.keys().any(|k| k.starts_with("cmt:")),
+                "{}: {} carries no container residue",
+                path.display(),
+                f.name
+            );
+        }
+        for pair in ex.functions.windows(2) {
+            assert!(
+                pair[0].addr <= pair[1].addr,
+                "{} sorted by address",
+                path.display()
+            );
+        }
+
+        // Classify-compatible: the shipped per-function model predicts on
+        // each feature vector without error.
+        let model_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("model/functions.json");
+        if model_path.exists() {
+            let m = compid::model::Model::load(&model_path)
+                .unwrap_or_else(|e| panic!("{} loads model: {e}", path.display()));
+            for f in &ex.functions {
+                let pred = m.predict(&f.features);
+                assert!(
+                    pred.fields
+                        .iter()
+                        .any(|field| field.field == "compiler_family"),
+                    "{}: {} predicts a compiler_family",
+                    path.display(),
+                    f.name
+                );
+            }
+        }
+    }
+}
+
+/// The x86_64 sample's exact enumeration: one named function in `__text`
+/// (`_main`, value 0x1000005d0, derived size 20 - the delta to the section
+/// end). The symtab's other entries stay out: `dyld_private` and
+/// `___dso_handle` sit in `__DATA`, `__mh_execute_header`'s value sits
+/// before the `__text` range, the undefined imports fail the type mask,
+/// and the STAB entries fail the stab check.
+#[test]
+fn macho_x86_64_sample_enumerates_exactly_main() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/macho_x86_64_sample");
+    let info = macho_load(&path);
+    let names: Vec<&str> = info.functions.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["_main"], "got: {names:?}");
+    let main = &info.functions[0];
+    assert_eq!(main.addr, 0x1000005d0);
+    assert_eq!(main.size, 20, "size runs to the __text section end");
+}
+
+/// The arm64 sample splits `__text` by the next symbol's value - the
+/// derived-size rule at work: `_main` runs to `_puts__thunk`, the thunk
+/// runs to the section end.
+#[test]
+fn macho_aarch64_sample_enumerates_main_and_thunk() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/macho_aarch64_sample");
+    let info = macho_load(&path);
+    let names: Vec<&str> = info.functions.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["_main", "_puts__thunk"], "got: {names:?}");
+    assert_eq!(info.functions[0].addr, 0x1000005d8);
+    assert_eq!(info.functions[0].size, 32, "delta to _puts__thunk");
+    assert_eq!(info.functions[1].addr, 0x1000005f8);
+    assert_eq!(
+        info.functions[1].size, 12,
+        "delta to the __text section end"
+    );
+}
+
 /// Report what the fixture directory holds right now.
 #[test]
 fn macho_fixture_presence_is_reported() {

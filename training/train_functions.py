@@ -237,6 +237,8 @@ def dataset_card(records: list[dict]) -> dict:
         "family_functions": Counter(rec["labels"]["compiler_family"] for rec in records),
         "opts": Counter(b["labels"]["opt_level"] for b in builds.values()),
         "archs": Counter(b["labels"]["arch"] for b in builds.values()),
+        "oses": Counter(b["labels"]["os"] for b in builds.values()),
+        "os_functions": Counter(rec["labels"]["os"] for rec in records),
     }
 
 
@@ -257,9 +259,12 @@ def write_eval_doc(path: Path, card: dict, rows: list[dict], args, skipped: list
     lines.append("## The dataset\n")
     lines.append(
         f"Per-function features extracted by `compid functions-batch --features` "
-        f"from **{card['n_builds']} unstripped ELF builds** "
-        f"({card['n_functions']} functions). Every function inherits its "
-        "build's manifest labels; nobody labels functions by hand.\n"
+        f"from **{card['n_builds']} builds with extractable functions** "
+        f"({card['n_functions']} functions): ELF rows via the symbol table "
+        "(or the stripped-x86-64 prologue heuristic), Mach-O rows via "
+        "`LC_SYMTAB`, and PE rows via the export directory. Every function "
+        "inherits its build's manifest labels; nobody labels functions by "
+        "hand.\n"
     )
     lines.append("| axis | builds (functions) |")
     lines.append("|------|--------------------|")
@@ -276,6 +281,13 @@ def write_eval_doc(path: Path, card: dict, rows: list[dict], args, skipped: list
     )
     lines.append(
         "| arch | " + ", ".join(f"{k} ({n})" for k, n in sorted(card["archs"].items())) + " |"
+    )
+    lines.append(
+        "| os | "
+        + ", ".join(
+            f"{k} ({card['os_functions'].get(k, 0)} fns)" for k, _ in sorted(card["oses"].items())
+        )
+        + " |"
     )
     lines.append("")
 
@@ -348,23 +360,139 @@ def write_eval_doc(path: Path, card: dict, rows: list[dict], args, skipped: list
         )
 
     lines.append("## How the model is trained\n")
+    weighting = (
+        "unweighted (`--no-balanced`)"
+        if getattr(args, "no_balanced", False)
+        else "class_weight='balanced'"
+    )
     lines.append(
         "One multinomial logistic regression per field "
-        f"(`LogisticRegression(max_iter={args.max_iter}, C={args.C})`) over "
-        "L2-normalized integer counts, exactly the whole-binary recipe. "
-        f"Features seen in fewer than {args.min_df} functions are dropped "
-        "(the whole-binary trainer's floor is 150; functions are small, so "
-        "rare n-grams survive less often). The export is "
-        "`compid-model/v1` - the same format as `model/model.json` - with "
-        "only `compiler_family` and `opt_level` fields.\n"
+        f"(`LogisticRegression(max_iter={args.max_iter}, C={args.C}, "
+        f"{weighting})`) over L2-normalized integer counts - the "
+        "whole-binary recipe plus class weighting, because function rows "
+        "inherit the matrix's toolchain skew (clang rows outnumber gcc "
+        "roughly 2.5:1) and an unweighted fit let the prior swallow "
+        "minority-toolchain functions inside mixed binaries. Disable with "
+        f"`--no-balanced`. Features seen in fewer than {args.min_df} "
+        "functions are dropped (the whole-binary trainer's floor is 150; "
+        "functions are small, so rare n-grams survive less often). The "
+        "export is `compid-model/v1` - the same format as "
+        "`model/model.json` - with only `compiler_family` and `opt_level` "
+        "fields.\n"
+    )
+
+    lines.append("## Stripped-binary boundaries — measured, not promised\n")
+    lines.append(
+        "`compid functions` no longer refuses a stripped binary outright. "
+        "For x86-64 ELF with no symbol table, two conservative scans over "
+        "the executable sections propose function starts, and their union "
+        "is merged by the same decode-aware overlap logic; extraction "
+        "proceeds with synthesized `func_<hex addr>` names, marked "
+        "`source: heuristic` in the JSON and by a header note in the table. "
+        "Nothing is guessed for other architectures: a stripped non-x86-64 "
+        "ELF, a PE without an export table, and a Mach-O without a symbol "
+        "table still report their explicit reasons.\n"
+    )
+    lines.append(
+        "The first scan is the prologue-pattern set (one const array in "
+        "`src/functions.rs`): `push rbp; mov rbp, rsp` and `push rbx; mov "
+        "rbx, rdi` at 16-byte alignment, `endbr64` at any alignment with a "
+        "frame-setup followup — and, at aligned sites, none — plus the "
+        "paired-`lea` crt-stub shape and PLT-stub exclusions. The second "
+        "scan is direct call-target analysis, which catches functions that "
+        "lack a frame-setup prologue (cold clones, shrink-wrapped `-Os` "
+        "entries): with the same length-aware x86-64 decoder the "
+        "clean-window count uses, each executable section is disassembled "
+        "linearly (skipping undecodable bytes one at a time), and every "
+        "decoded direct `call rel32` (opcode `E8`) records the target "
+        "`instruction address + instruction length + signed displacement` "
+        "as a candidate start. A call target qualifies when it falls inside "
+        "the scanned section (cross-section branches, e.g. into `.plt`, are "
+        "thereby excluded, matching the prologue scan's PLT treatment), "
+        "decodes cleanly for at least 16 bytes from the target, does not "
+        "open with a PLT-stub shape (`endbr64; jmp *GOT`, bare `jmp *GOT` / "
+        "`push *GOT`, or `push imm32; jmp rel32`), and is not already a "
+        "prologue candidate. Direct `jmp rel32` (`E9`) targets were "
+        "measured too and stay out: they add tail-thunk entries but far "
+        "more loop back-edges and goto joins, which split otherwise-correct "
+        "functions — with `E9` included the same sweep lands at precision "
+        "0.4334 / recall 0.9215 (F1 0.5896). The choice is pinned in one "
+        "const (`CALL_TARGETS_INCLUDE_JMP`) in `src/functions.rs`, and the "
+        "whole candidate union runs through the same merge pipeline, so a "
+        "start found only by a call target is indistinguishable from a "
+        "prologue start.\n"
+    )
+    lines.append(
+        "The heuristic is measured, not asserted. `compid functions <bin> "
+        "--measure` runs the scan on an unstripped binary and scores its "
+        "starts against the symbol table's starts at a ±8-byte tolerance; "
+        "`scripts/measure_boundaries.py` sweeps a stratified sample over "
+        "the manifest. The numbers below are the sweep over 40 linux-gnu "
+        "x86_64 manifest rows (8 per optimization level, O0 through Os, "
+        "seed 42), before and after the call-target scan joined the "
+        "prologue scan — re-run `scripts/measure_boundaries.py` against "
+        "any manifest to reproduce the shape of this table:\n"
+    )
+    lines.append("| pooled over 40 binaries | prologue scan only | prologue + call targets |")
+    lines.append("|-------------------------|--------------------|-------------------------|")
+    lines.append("| symbol-table starts (ground truth) | 2713 | 2713 |")
+    lines.append("| heuristic starts | 2376 | 2535 |")
+    lines.append("| matched within ±8 bytes | 2330 | 2489 |")
+    lines.append("| precision | 0.9806 | 0.9819 |")
+    lines.append("| recall | 0.8588 | 0.9174 |")
+    lines.append("| F1 | 0.9157 | 0.9486 |")
+    lines.append("")
+    lines.append(
+        "The call-target scan buys 159 recovered ground-truth starts while "
+        "adding only 13 unmatched starts — precision ticks up, not down, "
+        "because a direct `call` is strong evidence of a real entry point. "
+        "Per optimization level, pooled precision stays at 0.96-1.00 "
+        "everywhere and pooled recall is 0.75-0.95 (O0 0.92, O1 0.76, O2 "
+        "0.95, O3 0.75, Os 0.75). Eight further rows were skipped because "
+        "their symbol tables carry no function symbols at all (zig-cc "
+        "builds that list only undefined imports) — no ground truth, no "
+        "measurement.\n"
+    )
+    lines.append("What the residual misses are, honestly:\n")
+    lines.append(
+        "- Functions smaller than the 16-byte minimum: `.fini` (13 bytes) "
+        "on every dynamic binary, and any function abutting its section's "
+        "end."
+    )
+    lines.append(
+        "- Functions never reached by a direct `call` and matching no "
+        "prologue pattern: entries reached only through indirect dispatch "
+        "(function pointers, vtables) and never-called leftovers."
+    )
+    lines.append(
+        "- These cost recall, not precision: across the sweep, wrong "
+        "starts are rare (pooled precision 0.98), and the ones that occur "
+        "sit at legitimate-looking prologues or called addresses in "
+        "padding.\n"
+    )
+    lines.append(
+        "Recall is bounded, and that is the point of the conservative set: "
+        "a missed function costs one vote in the per-binary majority, while "
+        "a false start injects a vote for whatever the padding decodes as. "
+        "The stripped mixed-toolchain demo (`scripts/mixed_demo.sh`, second "
+        "half) runs the same gcc/zig majority assertion on a `strip`ped "
+        "copy and passes: the gcc half majority-predicts gcc and the zig "
+        "half majority-predicts clang (5 of its 6 attributed functions, "
+        "with 16 heuristic functions on the stripped copy against 11 before "
+        "the call-target scan).\n"
     )
 
     lines.append("## Limitations\n")
     lines.append(
-        "- Function boundaries come from ELF symbol tables only: the training "
-        "set is unstripped ELF, and that is also the only input "
-        "`compid functions` accepts today. Stripped-binary heuristics and "
-        "PE/Mach-O symbol sources are future work.\n"
+        "- Function boundaries come from the container's symbol sources: the "
+        "ELF symbol table (plus the stripped-x86-64 prologue heuristic), the "
+        "PE export directory, and the Mach-O `LC_SYMTAB`. What yields no "
+        "function rows: a PE without an export table (most plain Windows "
+        "executables), a Mach-O without a symbol table, and a stripped "
+        "non-x86-64 ELF. The PE rows are export-table functions only - the "
+        "bulk of a DLL's internal (non-exported) functions is invisible to "
+        "this path, and the last export of a section carries a "
+        "section-end-derived size rather than a true one.\n"
         "- Every function of a build shares the build's labels. A function "
         "inlined from a vendored, differently-built library is labeled with "
         "its container's toolchain, not its true generator; the mixed-demo "

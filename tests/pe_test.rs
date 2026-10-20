@@ -136,6 +136,121 @@ fn peinfo_load(path: &Path) -> compid::peinfo::PeInfo {
     compid::peinfo::load(path).unwrap_or_else(|e| panic!("{} parses as PE: {e}", path.display()))
 }
 
+/// The committed DLL fixture carries a real export directory: the four
+/// named exports of `corpus/sources/export_demo.c` enumerate as functions
+/// with delta-derived sizes, raw names, and the standard extraction
+/// wiring. Built by `corpus/build_fixtures.py` (the corpus's own DLL rows
+/// live in the gitignored dataset/binaries).
+#[test]
+fn pe_dll_fixture_enumerates_exported_functions() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/zig-cc_O2_x86_64_dll_sample");
+    if !path.exists() {
+        eprintln!("skipping: {path:?} not present; run corpus/build_fixtures.py");
+        return;
+    }
+    let info = peinfo_load(&path);
+    assert!(
+        info.has_exports,
+        "{} carries an export directory",
+        path.display()
+    );
+    let names: Vec<&str> = info.functions.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["export_add3", "export_djb2", "export_mix", "export_scale"],
+        "the four named exports, ordered by RVA: {names:?}"
+    );
+    // Derived sizes: three small next-export deltas, then the last
+    // export's section-end estimate (the documented heuristic).
+    assert_eq!(info.functions[0].addr, 0x1000);
+    for f in &info.functions[1..4] {
+        assert!(f.size > 0, "{} carries a derived size", f.name);
+    }
+    assert!(
+        info.functions[3].size > info.functions[0].size,
+        "the last export's section-end estimate dwarfs a function delta"
+    );
+
+    let ex = compid::functions::extract_pe(&info);
+    assert_eq!(
+        ex.source,
+        compid::functions::FunctionSource::SymbolTable,
+        "export-table boundaries are a symbol source"
+    );
+    assert!(
+        ex.reason.is_none(),
+        "no reason for an exporting DLL: {:?}",
+        ex.reason
+    );
+    assert_eq!(ex.functions.len(), 4);
+    for f in &ex.functions {
+        assert!(!f.features.is_empty(), "{} has features", f.name);
+        assert!(
+            f.features.keys().any(|k| k.starts_with("fn:")),
+            "{} carries an fn: bucket",
+            f.name
+        );
+        assert!(
+            f.features.keys().any(|k| k.starts_with("ng:")),
+            "{} carries byte n-grams",
+            f.name
+        );
+        assert!(
+            !f.features.keys().any(|k| k.starts_with("cmt:")),
+            "{} carries no container residue",
+            f.name
+        );
+    }
+
+    // Classify-compatible: the shipped per-function model predicts on each
+    // feature vector without error.
+    let model_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("model/functions.json");
+    if model_path.exists() {
+        let m = compid::model::Model::load(&model_path).expect("functions model loads");
+        for f in &ex.functions {
+            let pred = m.predict(&f.features);
+            assert!(
+                pred.fields
+                    .iter()
+                    .any(|field| field.field == "compiler_family"),
+                "{} predicts a compiler_family",
+                f.name
+            );
+        }
+    }
+}
+
+/// A plain PE executable with no export directory keeps the explicit
+/// no-export-table reason - function extraction never guesses boundaries
+/// for a PE without exported symbols. Uses the corpus windows binaries
+/// when present; reports and skips otherwise.
+#[test]
+fn pe_without_exports_reports_the_reason() {
+    let bins = windows_binaries();
+    if bins.is_empty() {
+        eprintln!("skipping: no dataset/binaries/*windows-gnu* binaries present");
+        return;
+    }
+    let plain = match bins.iter().find(|path| !peinfo_load(path).has_exports) {
+        Some(path) => path,
+        None => {
+            eprintln!("skipping: every present windows binary carries exports");
+            return;
+        }
+    };
+    let info = peinfo_load(plain);
+    assert!(info.functions.is_empty());
+    let ex = compid::functions::extract_pe(&info);
+    assert!(ex.functions.is_empty());
+    assert_eq!(ex.source, compid::functions::FunctionSource::SymbolTable);
+    let reason = ex.reason.expect("reason present");
+    assert!(
+        reason.contains("no export table") && reason.contains("exported symbols"),
+        "reason: {reason}"
+    );
+}
+
 /// Report what the binaries directory holds right now.
 #[test]
 fn pe_corpus_presence_is_reported() {

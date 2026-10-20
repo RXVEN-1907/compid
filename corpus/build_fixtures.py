@@ -16,8 +16,10 @@ Usage:
 """
 
 import argparse
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -145,6 +147,14 @@ SIZE_CAP = 120 * 1024
 # need it and stay under 17 KB.
 ZIG_FIXTURE_FLAGS = ["-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections"]
 
+# One PE fixture with an export table: the export-table probe source built
+# as a x86_64-windows-gnu DLL, so the export-enumeration tests run against a
+# committed binary (the corpus's own DLL rows live in the gitignored
+# dataset/binaries). Built from corpus/sources/export_demo.c - the same seed
+# the matrix's -dll rows compile - so fixture and corpus stay one source.
+DLL_FIXTURE = "zig-cc_O2_x86_64_dll_sample"
+DLL_SOURCE = REPO / "corpus" / "sources" / "export_demo.c"
+
 
 def build_one(cmd, out_path):
     try:
@@ -200,6 +210,30 @@ def main():
         if size > SIZE_CAP:
             print(f"WARN {fixture}: {size} bytes exceeds {SIZE_CAP}")
         built += 1
+
+    # The PE DLL fixture (see DLL_FIXTURE above). zig cc -shared leaves an
+    # import library and a PDB next to its output, so the link runs in a
+    # scratch directory and only the DLL itself lands in tests/fixtures.
+    dll_path = FIXTURES / DLL_FIXTURE
+    if dll_path.exists() and not args.force:
+        skipped += 1
+    elif "zig-cc" not in tcs:
+        print(f"FAIL {DLL_FIXTURE}: zig-cc toolchain not found")
+        failed += 1
+    else:
+        with tempfile.TemporaryDirectory() as scratch:
+            out = Path(scratch) / "fixture.dll"
+            cmd = list(tcs["zig-cc"].cc) + [
+                "-w", "-std=c11", "-O2", "-target", "x86_64-windows-gnu",
+                "-shared", "-o", str(out), str(DLL_SOURCE), "-lm",
+            ]
+            err = build_one(cmd, out)
+            if err:
+                print(f"FAIL {DLL_FIXTURE}: {err}")
+                failed += 1
+            else:
+                shutil.copyfile(out, dll_path)
+                built += 1
 
     print(f"fixtures: {built} built, {skipped} skipped, {failed} failed "
           f"-> {FIXTURES}")

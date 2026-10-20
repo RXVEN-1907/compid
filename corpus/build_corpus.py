@@ -12,6 +12,9 @@ The matrix covers the axes compid predicts:
   lto         -flto on/off (gcc, linux only)
   static      a handful of -static glibc builds; musl targets are static
               by default
+  dll         sources in FOCUSED_SLICE_SOURCES also build as
+              x86_64-windows-gnu DLLs (-shared) at O0/O2, so the matrix
+              carries PE binaries with an export directory
 
 Builds run in parallel with a per-build timeout, skip outputs that already
 exist (the run is resumable), record every failure with its compiler stderr,
@@ -75,6 +78,17 @@ ZIG_ARMHF_OPTS = ["O0", "O2"]
 ZIG_WINDOWS_OPTS = ["O0", "O2"]
 ZIG_MACOS_OPTS = ["O0", "O2"]
 ZIG_CXX_OPTS = ["O0", "O2"]
+# Sources that take a focused slice instead of the full matrix. Adding
+# export_demo to the standard loops would shift every deterministic variant
+# slice (the i % 3 / i % 4 picks are positions in the sorted source list)
+# and churn a hundred existing rows for no new axis; a focused slice keeps
+# the rest of the matrix byte-identical. The slice: a x86_64-windows-gnu DLL
+# at O0/O2 - its EXPORT macro expands to __declspec(dllexport) on _WIN32, so
+# the produced PE carries an export directory and `compid functions`
+# enumerates its functions from it - plus plain linux-gnu executables at
+# O0/O2 (EXPORT empty, regular symbol-table functions), so one seed source
+# contributes ELF-symbol-table and PE-export-table functions side by side.
+FOCUSED_SLICE_SOURCES = ("export_demo",)
 # How many of the sorted C++ sources (which all compile clean for the new
 # targets) join the cross matrix; the rest stay x86_64-only to keep the
 # matrix from exploding.
@@ -158,11 +172,16 @@ def build_plan(toolchains):
     """Yield job dicts for the whole matrix. Deterministic order."""
     tcs = by_name(toolchains)
     sources = source_files()
-    c_srcs = [(sid, path) for sid, path, lang in sources if lang == "c"]
+    # Focused-slice sources stay out of the sorted lists the variant slices
+    # index into: their positions would shift every i % 3 / i % 4 pick and
+    # churn existing rows. Their rows come from the dedicated block below.
+    c_srcs = [(sid, path) for sid, path, lang in sources
+              if lang == "c" and sid not in FOCUSED_SLICE_SOURCES]
     cxx_srcs = [(sid, path, lang) for sid, path, lang in sources if lang == "cxx"]
     jobs = []
 
-    def add(tc_name, target, opt, pie, lto, static, src_path, lang, hardening="none"):
+    def add(tc_name, target, opt, pie, lto, static, src_path, lang, hardening="none",
+            dll=False):
         tc = tcs[tc_name]
         arch, osname, abi = target_labels(target)
         src_id = src_path.stem
@@ -174,7 +193,11 @@ def build_plan(toolchains):
         if hardening != "none":
             tags["hardening"] = "hard"
         tag_order = ["pie", "lto", "static"] + (["hardening"] if "hardening" in tags else [])
-        build_id = f"{src_id}-{tc_name}-{target}-{opt}-" + "-".join(tags[t] for t in tag_order)
+        # A DLL build of the same source is a distinct build_id: "-dll" sits
+        # between the target and the optimization level, everything else
+        # keeps the documented shape.
+        build_id = (f"{src_id}-{tc_name}-{target}{'-dll' if dll else ''}-{opt}-"
+                    + "-".join(tags[t] for t in tag_order))
         out_path = BINARIES / build_id
         if tc.family == "clang":
             cc_prefix = list(tc.cc if lang == "c" else tc.cxx)
@@ -193,6 +216,10 @@ def build_plan(toolchains):
             cmd += ["-flto"]
         if static == "static":
             cmd += ["-static"]
+        if dll:
+            # A windows shared library: exports come from the source's
+            # __declspec(dllexport) annotations, no entry point.
+            cmd += ["-shared"]
         if hardening == "hardened":
             # Modern-distribution default hardening: stack protector, glibc
             # _FORTIFY_SOURCE wrappers, and Intel CET endbr64 instrumentation.
@@ -212,6 +239,7 @@ def build_plan(toolchains):
             "lto": lto,
             "static_cmd": static,
             "hardening": hardening,
+            "dll": dll,
             "arch": arch,
             "os": osname,
             "abi": abi,
@@ -277,6 +305,19 @@ def build_plan(toolchains):
                     for opt in opts:
                         add("zig-cc", target, opt, "default", "off", static, path, lang)
 
+    # The focused slice (see FOCUSED_SLICE_SOURCES): the export-table probe
+    # as a windows DLL and as plain linux-gnu executables, at the O0/O2 menu
+    # the DLL axis uses.
+    focused = [path for sid, path, _ in sources if sid in FOCUSED_SLICE_SOURCES]
+    for path in focused:
+        for opt in ("O0", "O2"):
+            if "gcc13" in tcs:
+                add("gcc13", "x86_64-linux-gnu", opt, "pie", "off", "dyn", path, "c")
+            if "zig-cc" in tcs:
+                add("zig-cc", "x86_64-linux-gnu", opt, "default", "off", "dyn", path, "c")
+                add("zig-cc", "x86_64-windows-gnu", opt, "default", "off", "dyn",
+                    path, "c", dll=True)
+
     jobs.sort(key=lambda j: j["build_id"])
     return jobs
 
@@ -305,7 +346,7 @@ def warmup(toolchains, jobs):
         tc = tcs[j["toolchain"]]
         if tc.family != "clang":
             continue  # gcc is stateless; nothing to warm
-        key = (j["toolchain"], j["lang"], j["target"], j["opt"], j["static_cmd"])
+        key = (j["toolchain"], j["lang"], j["target"], j["opt"], j["static_cmd"], j["dll"])
         if key in flavors:
             continue
         out = warm_dir / ("w_%s_%s_%s" % (j["lang"], j["target"], j["opt"]))
@@ -314,6 +355,10 @@ def warmup(toolchains, jobs):
         cmd += ["-std=c11" if j["lang"] == "c" else "-std=c++17", "-" + j["opt"]]
         if j["static_cmd"] == "static":
             cmd += ["-static"]
+        if j["dll"]:
+            # The DLL link mode is its own zig cache entry; warm it like the
+            # rest or the first real DLL build pays the one-time cost.
+            cmd += ["-shared"]
         cmd += ["-o", str(out), str(src if j["lang"] == "c" else srccxx), "-lm"]
         flavors[key] = cmd
 

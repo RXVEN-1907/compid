@@ -103,9 +103,9 @@ enum Cmd {
         #[arg(short, long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
-    /// Per-function provenance for one binary (unstripped ELF; stripped x86-64 ELF via the prologue heuristic)
+    /// Per-function provenance for one binary (ELF symtab or stripped x86-64 heuristic; PE export table; Mach-O symtab)
     Functions {
-        /// Path to an ELF binary (PE and Mach-O are reported as unsupported)
+        /// Path to an ELF, PE, or Mach-O binary (formats without a symbol source report a reason)
         bin: PathBuf,
         /// Trained per-function model; omit it for a plain function listing
         #[arg(long, value_name = "FILE")]
@@ -124,7 +124,7 @@ enum Cmd {
         #[arg(long, value_name = "WHEN", default_value = "auto")]
         color: term::ColorChoice,
     },
-    /// Per-function extraction over every manifest row whose binary has functions (unstripped ELF; stripped x86-64 ELF via the heuristic)
+    /// Per-function extraction over every manifest row whose binary has functions (ELF symtab or stripped x86-64 heuristic; PE export table; Mach-O symtab)
     FunctionsBatch {
         /// Manifest CSV listing binaries (build_id + path columns required)
         manifest: PathBuf,

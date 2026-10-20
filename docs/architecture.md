@@ -156,12 +156,21 @@ clang-built vendored library, a musl static libc. `compid functions`
 re-runs the feature core at function granularity so each answer can be
 found separately:
 
-- **Boundaries.** Function ranges come from two sources. Unstripped ELF
-  (and relocatable objects): SHT_SYMTAB entries of type STT_FUNC with a
-  nonzero size, deduplicated by `(st_value, st_size)`, resolved to file
-  offsets through their containing executable section - in `ET_REL` the
-  symbol value is a section offset, in a linked binary it is a virtual
-  address. Names stay raw; nothing is demangled. Stripped x86-64 ELF: a
+- **Boundaries.** Function ranges come from the container's own symbol
+  sources, one per format. Unstripped ELF (and relocatable objects):
+  SHT_SYMTAB entries of type STT_FUNC with a nonzero size, deduplicated by
+  `(st_value, st_size)`, resolved to file offsets through their containing
+  executable section - in `ET_REL` the symbol value is a section offset,
+  in a linked binary it is a virtual address. PE: the export directory -
+  named, non-forwarded exports landing in an executable section, address
+  being the export's RVA; the table records no sizes, so each size is the
+  delta to the next export's RVA in the section (the section end for the
+  last one), and a plain Windows executable without an export table
+  reports that honestly instead of guessing. Mach-O: `LC_SYMTAB` entries
+  whose type mask says `N_SECT`, in an executable `__TEXT`-segment section
+  and inside the section's range - names stay raw (the ABI's leading
+  underscore included), sizes again derived from the next defined symbol's
+  value. Names never demangle, on any format. Stripped x86-64 ELF: a
   conservative prologue scan over the executable sections (one const
   pattern array in `src/functions.rs` - frame-pointer prologues, CET
   `endbr64` sites with alignment and PLT-stub gates, the crt-stub
@@ -171,10 +180,11 @@ found separately:
   scan is measured against symbol-table ground truth - `compid functions
   <BIN> --measure` prints per-binary precision/recall, and the pooled
   numbers live in `docs/FUNCTIONS-EVALUATION.md` (pooled 0.98 precision,
-  0.86 recall over a 40-binary O0-Os sweep). A stripped non-x86-64 ELF, a
-  PE, or a Mach-O yields an empty function list with an explicit reason -
-  boundaries are never guessed for architectures the scanner does not
-  read. PE/Mach-O symbol sources are the next rounds.
+  0.86 recall over a 40-binary O0-Os sweep). What still yields an empty
+  function list with an explicit reason: a stripped non-x86-64 ELF, a PE
+  without an export directory, and a Mach-O without a symbol table -
+  boundaries are never guessed where no symbol source and no scanner
+  apply.
 - **Features.** Each function gets the same byte- and code-shape
   namespaces scoped to exactly its own bytes: `ng:`, `mn:`, `rg:`, `cn:`,
   plus a one-hot size bucket `fn:<floor(log2(bytes))>` clamped to 0..=24

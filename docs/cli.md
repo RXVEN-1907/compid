@@ -161,13 +161,18 @@ present.
 compid functions <BIN> [--model PATH] [--features FILE] [--json] [--measure] [--color auto|always|never]
 ```
 
-Per-function provenance for one binary. Function boundaries come from the
-ELF symbol table, so the input should be an unstripped ELF - a relocatable
-`.o` works too. The table lists each function's raw (never demangled)
-symbol name, its address as the symbol table records it, its size, and -
-when a function-level model is loaded - the predicted `compiler_family`
-and `opt_level` with per-function confidence, plus a footer tallying the
-predicted families:
+Per-function provenance for one binary. All three container formats have a
+symbol source now: an unstripped ELF (a relocatable `.o` works too) lists
+its SHT_SYMTAB function symbols, a PE with an export directory lists its
+named exports (a plain Windows executable without an export table reports
+that instead - boundaries are never guessed there), and a Mach-O with an
+`LC_SYMTAB` lists its defined symbols in executable `__TEXT` sections
+(names keep the ABI's leading underscore, and nlist sizes are derived from
+the next symbol's value or the section end). The table lists each
+function's raw (never demangled) symbol name, its address as the symbol
+source records it, its size, and - when a function-level model is loaded -
+the predicted `compiler_family` and `opt_level` with per-function
+confidence, plus a footer tallying the predicted families:
 
 ```text
 $ compid functions mixed-demo --model model/functions.json
@@ -190,9 +195,10 @@ function starts (see `docs/FUNCTIONS-EVALUATION.md` for the measured
 precision and recall), each start is named `func_<hex addr>`, and the table
 carries a header note - `function boundaries: prologue heuristic (stripped
 binary)` - so synthesized names are never mistaken for symbol names. The `--json` output marks the
-source explicitly (`"source": "heuristic"` versus `"symbol_table"`). A
-stripped non-x86-64 ELF, a PE, and a Mach-O still print their explicit
-reasons instead of a table and exit 0. `--model` defaults to
+source explicitly (`"source": "heuristic"` versus `"symbol_table"`). What
+still prints an explicit reason instead of a table (and exits 0): a
+stripped non-x86-64 ELF, a PE without an export table, and a Mach-O
+without a symbol table. `--model` defaults to
 `model/functions.json` when that file exists; an explicitly passed `--model`
 that does not exist is an error. A model file carries only the two
 per-function fields, so the table never predicts container-level labels -
@@ -228,14 +234,16 @@ compid functions-batch <MANIFEST> [--out FILE] [--features]
 ```
 
 Runs per-function extraction over every manifest row whose binary exists
-and carries functions: unstripped ELF via the symbol table, stripped
-x86-64 ELF via the prologue heuristic. With `--features`, writes the
+and carries functions: ELF via the symbol table (stripped x86-64 ELF via
+the prologue heuristic), Mach-O via `LC_SYMTAB`, and PE via the export
+directory. With `--features`, writes the
 per-function training JSONL - one object per function with `build_id`,
 `name`, `addr`, `size`, `labels` (the manifest's ground-truth labels for
 that row, the same convention as `batch`), and `features` - which is the
 input `training/train_functions.py` expects. Without `--features`, writes
 a plain per-binary listing (name, address, size). Rows whose binary is
-missing, yields no functions (a stripped non-x86-64 ELF, a PE, a Mach-O),
+missing, yields no functions (a plain PE without an export table, a
+stripped Mach-O, a stripped non-x86-64 ELF),
 or fails to parse are skipped with a per-row stderr note and summarized in
 the final line.
 

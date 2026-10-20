@@ -26,15 +26,23 @@
 //!   side's `.gnu.lto_*` detection.
 //! - `build_id` is the `LC_UUID` load command's 128-bit value in lowercase
 //!   hex when one is present, else `none`.
+//! - Function symbols come from the `LC_SYMTAB` symbol table when the image
+//!   carries one (see [`MachoInfo::functions`]). An nlist entry records no
+//!   size, so each function's size is derived: the delta to the next defined
+//!   symbol in the same section, or the section end for the last one. Names
+//!   keep the ABI's leading underscore (`_main`) - the raw symbol-table
+//!   spelling, the same raw-never-demangled rule the ELF path follows.
 
 use anyhow::{anyhow, bail, Context, Result};
 use goblin::mach::constants::cputype;
 use goblin::mach::header as mh;
 use goblin::mach::load_command::CommandVariant;
+use goblin::mach::symbols::N_SECT;
 use goblin::mach::MachO;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-use crate::elfinfo::SectionInfo;
+use crate::elfinfo::{FunctionSymbol, SectionInfo};
 
 /// The low 8 bits of a section's `flags` carry the section type.
 const SECTION_TYPE_MASK: u32 = 0xff;
@@ -84,6 +92,19 @@ pub struct MachoInfo {
     /// Raw header `filetype` value (`MH_EXECUTE`, `MH_DYLIB`, ...), kept so
     /// callers can tell image kinds apart without re-parsing.
     pub filetype: u32,
+    /// Function symbols from the symbol table (empty for a stripped image or
+    /// one whose symtab holds no usable functions). Only defined, non-stab
+    /// nlist entries (`n_type & N_TYPE == N_SECT`) whose section is an
+    /// executable `__TEXT`-segment section and whose value falls inside that
+    /// section are listed, deduplicated by `(value, size)`; names are raw
+    /// symbol-table strings including the ABI's leading underscore, never
+    /// demangled. nlist entries carry no size, so `size` is derived: the
+    /// delta to the next defined symbol value in the same section, or the
+    /// section end for the last one.
+    pub functions: Vec<FunctionSymbol>,
+    /// true when the file carries an `LC_SYMTAB` load command at all; the
+    /// stripped-versus-no-functions distinction for error reporting.
+    pub has_symtab: bool,
     /// The whole file, kept so per-section bytes (entropy, and anything
     /// feature extraction wants) stay available without a re-read.
     file: std::sync::Arc<Vec<u8>>,
@@ -151,7 +172,20 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<MachoInfo> {
     // Collect named sections with their extents. `size` is the memory size
     // the loader maps; zero-fill sections (and anything with no file
     // offset) have no bytes in the file, so entropy skips them.
+    //
+    // `sections_by_index` mirrors the nlist `n_sect` numbering: a 1-based
+    // index across every section of every segment in load-command order,
+    // unnamed sections included. Index 0 is NO_SECT. `sections` keeps only
+    // the named ones, the geometry `sec:`/`ent:` features key on.
     let mut sections: Vec<SectionInfo> = Vec::new();
+    let mut sections_by_index: Vec<SectionInfo> = vec![SectionInfo {
+        name: String::new(),
+        offset: 0,
+        size: 0,
+        no_bits: true,
+        addr: 0,
+        executable: false,
+    }];
     let mut text: Option<Vec<u8>> = None;
     let mut lto = false;
     for segment in &macho.segments {
@@ -162,9 +196,6 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<MachoInfo> {
         {
             let sectname = fixed_name(&sect.sectname);
             let segname = fixed_name(&sect.segname);
-            if sectname.is_empty() {
-                continue;
-            }
             if segname == "__LLVM" && (sectname == "__bitcode" || sectname == "__bundle") {
                 lto = true;
             }
@@ -181,16 +212,23 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<MachoInfo> {
             if segname == "__TEXT" && sectname == "__text" && !no_bits {
                 text = Some(bytes.clone());
             }
-            sections.push(SectionInfo {
+            let info = SectionInfo {
                 name: format!("{segname},{sectname}"),
                 offset,
                 size: sect.size,
                 no_bits,
                 addr: sect.addr,
                 executable: segname == "__TEXT",
-            });
+            };
+            sections_by_index.push(info.clone());
+            if sectname.is_empty() {
+                continue;
+            }
+            sections.push(info);
         }
     }
+
+    let (functions, has_symtab) = enumerate_functions(&macho, &sections_by_index);
 
     let build_id = macho
         .load_commands
@@ -219,8 +257,111 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<MachoInfo> {
         sections,
         cputype: cpu,
         filetype,
+        functions,
+        has_symtab,
         file: data,
     })
+}
+
+/// Collect function symbols from the symbol table (`LC_SYMTAB`). Only
+/// defined, non-stab nlist entries (`n_type & N_TYPE == N_SECT`, the
+/// is-function type-mask check) whose 1-based `n_sect` names an executable,
+/// byte-backed `__TEXT`-segment section and whose value falls inside that
+/// section are kept - the same section-containment rule the ELF path
+/// applies to `st_value`. Undefined imports (type `N_UNDF`), absolute and
+/// linker-known symbols, and STAB debug entries never reach the list.
+///
+/// nlist entries record no size, so each function's size is derived: the
+/// delta to the next defined symbol value in the same section, or the
+/// section end for the section's last symbol (clamped to the section, which
+/// the containment check already guarantees). The boundary set counts every
+/// defined symbol in the section, unnamed ones included, so a linker-local
+/// alias still ends the function before it. Entries with a derived size of
+/// zero are skipped, and duplicates collapse by `(value, size)` with the
+/// first symtab order winning. Names stay raw - the ABI's leading
+/// underscore included - and are never demangled. Returns
+/// `(functions, has_symtab)`; `has_symtab` is false only when the image has
+/// no `LC_SYMTAB` load command at all.
+fn enumerate_functions(
+    macho: &MachO,
+    sections_by_index: &[SectionInfo],
+) -> (Vec<FunctionSymbol>, bool) {
+    let symbols = match macho.symbols {
+        Some(ref symbols) => symbols,
+        None => return (Vec::new(), false),
+    };
+
+    // Every defined, non-stab symbol in an executable section, recorded as
+    // `(n_sect, n_value, name)` in symtab order, plus the per-section
+    // boundary values the derived sizes run to.
+    let mut sites: Vec<(usize, u64, String)> = Vec::new();
+    let mut bounds: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
+    for named in symbols.iter() {
+        let (name, nlist) = match named {
+            Ok(pair) => pair,
+            // An unreadable string-table entry cannot be named; skip it the
+            // way the ELF path skips a missing strtab lookup.
+            Err(_) => continue,
+        };
+        if nlist.is_stab() || nlist.get_type() != N_SECT {
+            continue;
+        }
+        let idx = nlist.n_sect;
+        if idx == 0 || idx >= sections_by_index.len() {
+            continue;
+        }
+        let section = &sections_by_index[idx];
+        if section.no_bits || !section.executable || section.size == 0 {
+            continue;
+        }
+        let lo = section.addr;
+        let hi = lo.saturating_add(section.size);
+        if nlist.n_value < lo || nlist.n_value >= hi {
+            continue;
+        }
+        bounds.entry(idx).or_default().push(nlist.n_value);
+        sites.push((idx, nlist.n_value, name.to_string()));
+    }
+    for values in bounds.values_mut() {
+        values.sort_unstable();
+        values.dedup();
+    }
+
+    let mut functions: Vec<FunctionSymbol> = Vec::new();
+    let mut seen: HashSet<(u64, u64)> = HashSet::new();
+    for (idx, value, name) in sites {
+        if name.is_empty() {
+            continue;
+        }
+        let section = &sections_by_index[idx];
+        let hi = section.addr.saturating_add(section.size);
+        // The next defined symbol value in this section, strictly greater
+        // than `value`; the section end for the last one.
+        let next = bounds[&idx]
+            .iter()
+            .find(|&&v| v > value)
+            .copied()
+            .unwrap_or(hi);
+        let size = next.min(hi).saturating_sub(value);
+        if size == 0 {
+            continue;
+        }
+        if !seen.insert((value, size)) {
+            continue; // same (address, size) range already listed
+        }
+        // The offset arithmetic saturates: the section record comes from
+        // untrusted load commands, and the delta conversion saturates on
+        // 32-bit hosts where the consumers clamp to the file extent anyway.
+        let delta = usize::try_from(value - section.addr).unwrap_or(usize::MAX);
+        functions.push(FunctionSymbol {
+            name,
+            addr: value,
+            size,
+            file_offset: section.offset.saturating_add(delta),
+        });
+    }
+    functions.sort_by(|a, b| a.addr.cmp(&b.addr).then_with(|| a.name.cmp(&b.name)));
+    (functions, true)
 }
 
 /// Human-friendly architecture name from the header `cputype` value, spelled

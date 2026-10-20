@@ -9,15 +9,19 @@
 //! `sec:`/`ent:` geometry and no `cmt:` residue: those describe the
 //! container, not a function.
 //!
-//! Function boundaries come from two sources. For an unstripped ELF (and
-//! relocatable objects): SHT_SYMTAB entries of type STT_FUNC with a nonzero
-//! `st_size`, deduplicated by `(st_value, st_size)`, raw (never demangled)
-//! names. For a stripped x86-64 ELF: a conservative prologue scan over the
-//! executable sections (see [`PROLOGUE_PATTERNS`]) unioned with direct
-//! call-target analysis (see [`collect_direct_branch_targets`]), with
-//! synthesized `func_<hex addr>` names. PE and Mach-O symbol sources remain
-//! future work; a PE, a Mach-O, or a non-x86-64 stripped ELF yields an
-//! empty function list with a reason string instead of guessing boundaries.
+//! Function boundaries come from three symbol sources. For an unstripped
+//! ELF (and relocatable objects): SHT_SYMTAB entries of type STT_FUNC with
+//! a nonzero `st_size`, deduplicated by `(st_value, st_size)`, raw (never
+//! demangled) names. For a PE: the export directory's named exports, sizes
+//! derived from the next export's RVA. For a Mach-O: `LC_SYMTAB` entries of
+//! type `N_SECT` in executable `__TEXT` sections, sizes derived from the
+//! next symbol's value. For a stripped x86-64 ELF: a conservative prologue
+//! scan over the executable sections (see [`PROLOGUE_PATTERNS`]) unioned
+//! with direct call-target analysis (see [`collect_direct_branch_targets`]),
+//! with synthesized `func_<hex addr>` names. What stays an explicit reason
+//! rather than a guess: a PE without an export table, a Mach-O without a
+//! symbol table, and a non-x86-64 stripped ELF - an empty function list
+//! with a reason string instead of guessed boundaries.
 
 use crate::elfinfo::{ElfInfo, FunctionSymbol};
 use crate::features::{disassemble_window, log2_size, Labels, WINDOW_SIZE};
@@ -50,8 +54,9 @@ pub struct FunctionFeatures {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FunctionSource {
-    /// ELF symbol table (SHT_SYMTAB function symbols): unstripped ELF and
-    /// relocatable objects.
+    /// A symbol source the container itself carries: the ELF symbol table
+    /// (SHT_SYMTAB function symbols - unstripped ELF and relocatable
+    /// objects), the PE export directory, or the Mach-O `LC_SYMTAB`.
     SymbolTable,
     /// Conservative prologue-pattern scan plus direct call-target analysis
     /// over the executable sections of a stripped x86-64 ELF; names are
@@ -72,9 +77,11 @@ pub struct FunctionsExtraction {
     pub source: FunctionSource,
     /// One entry per function, ordered by address.
     pub functions: Vec<FunctionFeatures>,
-    /// Set when function-level extraction does not apply: a container whose
-    /// symbol source is not implemented yet, or a stripped binary whose
-    /// executable sections held no heuristic candidates.
+    /// Set when function-level extraction does not apply: a container with
+    /// no usable symbol source for this round (a PE without an export
+    /// table, a Mach-O without a symbol table, a stripped non-x86-64 ELF),
+    /// or a stripped binary whose executable sections held no heuristic
+    /// candidates.
     pub reason: Option<String>,
 }
 
@@ -680,19 +687,44 @@ pub fn extract_elf(info: &ElfInfo) -> FunctionsExtraction {
     }
 }
 
-/// Placeholder for PE: COFF symbol-table support is not wired yet, so the
-/// list is empty with an explicit reason.
+/// Per-function extraction from parsed PE material: the export directory is
+/// the symbol source. A binary with named exports in an executable section
+/// (DLLs, and executables that export symbols) lists them with sizes
+/// derived from the export table - the delta to the next export's RVA,
+/// the section end for the last one; a plain executable with no export
+/// directory, or one whose table carries no usable function exports, stays
+/// an empty list with an explicit reason. Every listed function's bytes are
+/// read through [`PeInfo::section_data`].
 pub fn extract_pe(info: &PeInfo) -> FunctionsExtraction {
+    let labels = Labels::from_pe(info);
+    let build_id = info.build_id.clone();
+
+    let functions = info
+        .functions
+        .iter()
+        .map(|fs| FunctionFeatures {
+            name: fs.name.clone(),
+            addr: fs.addr,
+            size: fs.size,
+            features: function_features(&info.section_data(fs.file_offset, fs.size)),
+        })
+        .collect::<Vec<_>>();
+    let reason = functions.is_empty().then(|| {
+        if info.has_exports {
+            "export table carries no usable function exports (named exports \
+             landing in an executable section)"
+        } else {
+            "no export table: PE function extraction needs exported symbols \
+             this round"
+        }
+        .to_string()
+    });
     FunctionsExtraction {
-        build_id: info.build_id.clone(),
-        labels: Labels::from_pe(info),
+        build_id,
+        labels,
         source: FunctionSource::SymbolTable,
-        functions: Vec::new(),
-        reason: Some(
-            "PE function extraction is not implemented yet; function \
-             boundaries come from ELF symbol tables only this round"
-                .to_string(),
-        ),
+        functions,
+        reason,
     }
 }
 
@@ -795,18 +827,45 @@ pub fn measure_boundaries(info: &ElfInfo) -> Result<BoundaryMetrics> {
     })
 }
 
-/// Placeholder for Mach-O: same situation as PE.
+/// Per-function extraction from parsed Mach-O material: the `LC_SYMTAB`
+/// symbol table is the symbol source. An unstripped image lists its
+/// defined, non-stab symbols in executable `__TEXT` sections (raw names
+/// with the ABI's leading underscore; sizes derived from the next symbol's
+/// value - see [`crate::machoinfo::MachoInfo::functions`]); a stripped
+/// image, or one whose symtab holds no usable functions, stays an empty
+/// list with an explicit reason. Every listed function's bytes are read
+/// through [`MachoInfo::section_data`].
 pub fn extract_macho(info: &MachoInfo) -> FunctionsExtraction {
+    let labels = Labels::from_macho(info);
+    let build_id = info.build_id.clone();
+
+    let functions = info
+        .functions
+        .iter()
+        .map(|fs| FunctionFeatures {
+            name: fs.name.clone(),
+            addr: fs.addr,
+            size: fs.size,
+            features: function_features(&info.section_data(fs.file_offset, fs.size)),
+        })
+        .collect::<Vec<_>>();
+    let reason = functions.is_empty().then(|| {
+        if info.has_symtab {
+            "symbol table carries no usable function symbols (defined, \
+             non-stab symbols in an executable __TEXT section with a \
+             derived size)"
+        } else {
+            "no symbol table: binary looks stripped; function extraction \
+             needs an unstripped Mach-O"
+        }
+        .to_string()
+    });
     FunctionsExtraction {
-        build_id: info.build_id.clone(),
-        labels: Labels::from_macho(info),
+        build_id,
+        labels,
         source: FunctionSource::SymbolTable,
-        functions: Vec::new(),
-        reason: Some(
-            "Mach-O function extraction is not implemented yet; function \
-             boundaries come from ELF symbol tables only this round"
-                .to_string(),
-        ),
+        functions,
+        reason,
     }
 }
 

@@ -13,7 +13,7 @@ in `corpus/` and is documented in `corpus/README.md`.
 | `dataset/binaries/`         | no (gitignored)           | the binaries themselves; manifest paths point here    |
 | `dataset/features/train.jsonl.gz.*` | yes, after a training run | extracted whole-binary features, one object per line, gzipped, split into <100 MB shards |
 | `dataset/features/train.jsonl` | no (gitignored)        | the uncompressed same thing; a regeneration artifact  |
-| `dataset/features/functions.jsonl.gz.*` | yes, after a functions training run | per-function features from the manifest's ELF rows (symbol-table boundaries on unstripped builds, the prologue heuristic on stripped x86-64 ones), one object per function, gzipped, split into <100 MB shards |
+| `dataset/features/functions.jsonl.gz.*` | yes, after a functions training run | per-function features from every manifest row with a function symbol source (ELF symtab rows, stripped x86-64 heuristic rows, Mach-O `LC_SYMTAB` rows, PE export-directory rows), one object per function, gzipped, split into <100 MB shards |
 | `dataset/features/functions.jsonl` | no (gitignored)    | the uncompressed same thing; a regeneration artifact  |
 
 Reassemble both feature files from the shipped shards with:
@@ -28,7 +28,7 @@ Regenerate both from the binaries any time with:
 ```console
 $ cargo build --release
 $ ./target/release/compid batch dataset/manifest.csv --out dataset/features/train.jsonl
-$ ./target/release/compid functions-batch dataset/manifest.csv --out dataset/features/functions.jsonl
+$ ./target/release/compid functions-batch dataset/manifest.csv --features --out dataset/features/functions.jsonl
 ```
 
 ## Manifest schema

@@ -7,14 +7,14 @@ Items are ordered roughly by how much capability they add per unit of work.
 
 ### Function-level classification
 
-Unstripped ELF done as of this round: `compid functions` enumerates
-functions from the ELF symbol table (relocatable objects included), scores
-each function's scoped feature vector with `model/functions.json`
+Done, all three container formats. `compid functions` enumerates functions
+from the ELF symbol table (relocatable objects included), scores each
+function's scoped feature vector with `model/functions.json`
 (`compiler_family` and `opt_level`), and `compid functions-batch --features`
 feeds `training/train_functions.py`, whose hold-out splits by build. The
 mixed-toolchain proof runs mechanically as `scripts/mixed_demo.sh`.
 
-Stripped x86-64 ELF is done too, measured rather than promised: a
+Stripped x86-64 ELF is covered too, measured rather than promised: a
 conservative prologue scan unioned with direct call-target analysis
 proposes the boundaries (`source: heuristic`, synthesized `func_<hex addr>`
 names), `compid functions <BIN> --measure` scores it against symbol ground
@@ -23,10 +23,23 @@ precision 0.9819 / recall 0.9174 (F1 0.9486), up from 0.9806 / 0.8588
 (F1 0.9157) for the prologue scan alone - numbers and residual misses
 documented in `docs/FUNCTIONS-EVALUATION.md`. `scripts/mixed_demo.sh`
 extends the majority assertion to a `strip`ped copy of the mixed binary
-and holds. Call-target analysis is done; still ahead for the function-level
-item: PE/Mach-O symbol sources, after which the output is a complete
-per-function provenance table for binaries assembled from mixed toolchains
-and vendored libraries.
+and holds.
+
+PE and Mach-O symbol sources are done as of this round, which closes the
+function-level item: a PE enumerates its export directory (named exports
+in an executable section; sizes derived from the next export's RVA, the
+section end for the last one - documented, since the export table carries
+no sizes), the matrix seeds matching windows-DLL rows
+(`export_demo-zig-cc-x86_64-windows-gnu-dll-*`), and a Mach-O enumerates
+its `LC_SYMTAB` (defined non-stab symbols in executable `__TEXT` sections,
+raw names with the ABI's leading underscore, next-symbol-derived sizes).
+The per-function dataset now spans all three formats (267,626 ELF, 74,873
+Mach-O, and 8 PE function rows), and the hold-out numbers moved up with
+the added coverage. What remains open is heuristic rather than symbolic:
+boundaries for a plain PE without an export table and for a stripped
+Mach-O (prologue-style scans over `.text` / `__text`), and per-function
+`static`-side details the export table cannot see (non-exported DLL
+functions, Mach-O sizes that only DWARF would pin down).
 
 ### Ghidra and IDA plugins
 

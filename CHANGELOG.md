@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- PE and Mach-O function sources, closing the function-level roadmap item:
+  `compid functions` now covers all three container formats. A PE
+  enumerates its export directory - named, non-forwarded exports landing
+  in an executable section, with sizes derived from the next export's RVA
+  (the section end for the last one; the table records no sizes, and the
+  heuristic is documented as such) - while a plain Windows executable
+  without an export table keeps its explicit
+  "no export table: PE function extraction needs exported symbols this
+  round" reason. A Mach-O enumerates its `LC_SYMTAB`: defined, non-stab
+  symbols (`n_type & N_TYPE == N_SECT`) whose 1-based section index names
+  an executable `__TEXT`-segment section their value falls inside, raw
+  names with the ABI's leading underscore kept, and sizes derived from the
+  next defined symbol's value in the section (nlist entries carry no
+  size), deduplicated by `(value, size)` like the ELF path. The corpus
+  seeds PE function rows: `corpus/sources/export_demo.c` carries a
+  portable export macro and takes a focused slice (x86_64-windows-gnu
+  `-shared` DLL rows at O0/O2 plus linux-gnu executables, deliberately
+  outside the standard loops so the deterministic variant slices do not
+  shift), and `tests/fixtures/zig-cc_O2_x86_64_dll_sample` is a committed
+  PE DLL built by `corpus/build_fixtures.py` from the same source. The
+  per-function dataset now spans all three formats (342,507 function rows
+  from 1,297 builds: 267,626 ELF, 74,873 Mach-O, 8 PE), and the retrained
+  `model/functions.json` holds at hold-out top-1 0.9995 `compiler_family`
+  / 0.9204 `opt_level` (build-majority 0.9885 / 0.8423).
 - Colored terminal output and a `compid report` one-screen summary. A
   small in-tree ANSI engine (`src/term.rs`, no external crates) renders
   the human tables with a restrained palette: lavender block-character

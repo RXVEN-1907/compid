@@ -20,13 +20,19 @@
 //!   `compid batch` replaces these labels with it.
 //! - `build_id` is the CodeView PDB 7.0 signature GUID when a debug
 //!   directory carries one, else `none`.
+//! - Function symbols come from the export directory when the image carries
+//!   one (see [`PeInfo::functions`]). The export table records no sizes, so
+//!   each export's size is derived: the delta to the next export's RVA in
+//!   the same section, or the section end for the last one. A plain
+//!   executable carries no export directory at all.
 
 use anyhow::{anyhow, bail, Context, Result};
 use goblin::pe::header as coff;
 use goblin::Object;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-use crate::elfinfo::SectionInfo;
+use crate::elfinfo::{FunctionSymbol, SectionInfo};
 
 /// IMAGE_SCN_CNT_UNINITIALIZED_DATA: the section occupies memory but holds
 /// no bytes in the file (the PE analog of ELF `SHT_NOBITS`).
@@ -65,6 +71,17 @@ pub struct PeInfo {
     /// Raw COFF `machine` value, kept so callers can branch without
     /// re-parsing.
     pub machine: u16,
+    /// Exported functions from the export directory (empty when the image
+    /// has no export table). Only named, non-forwarded exports whose RVA
+    /// lands in an executable, byte-backed section are listed,
+    /// deduplicated by `(rva, size)`; names are the raw export-directory
+    /// strings, never demangled. The export table records no sizes, so
+    /// `size` is derived: the delta to the next export's RVA in the same
+    /// section, or the section end for the last one.
+    pub functions: Vec<FunctionSymbol>,
+    /// true when the file carries an export data directory at all; the
+    /// no-export-table-versus-empty-table distinction for error reporting.
+    pub has_exports: bool,
     /// The whole file, kept so per-section bytes (entropy, and anything
     /// feature extraction wants) stay available without a re-read.
     file: std::sync::Arc<Vec<u8>>,
@@ -169,6 +186,9 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<PeInfo> {
         |guid| guid.iter().map(|b| format!("{b:02x}")).collect(),
     );
 
+    let has_exports = pe.export_data.is_some();
+    let functions = enumerate_exported_functions(&pe, &sections);
+
     Ok(PeInfo {
         labels: PeLabels {
             compiler_family: "unknown".to_string(),
@@ -186,8 +206,95 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<PeInfo> {
         text,
         sections,
         machine,
+        functions,
+        has_exports,
         file: data,
     })
+}
+
+/// Collect exported functions from the export directory. Only named,
+/// non-forwarded exports (`name` present, `reexport` empty - a forwarder
+/// RVA points at a string, not code) whose RVA lands inside an executable,
+/// byte-backed section are kept; data exports and exports into
+/// uninitialized sections never reach the list. The RVA is the function's
+/// address (the manifest-convention addr the ELF side records as
+/// `st_value`), resolved to a file offset through its containing section -
+/// the same containment rule the ELF path applies to symbol values.
+///
+/// The export table records no sizes, so each export's size is derived: the
+/// delta to the next export's RVA in the same section, or the section end
+/// for that section's last export (the section-clamped estimate). Two
+/// exports sharing one RVA (ordinal aliases of one function) both take that
+/// derived size and then collapse by `(rva, size)` with the
+/// alphabetically-first name winning, mirroring the ELF path's
+/// first-symbol-wins dedupe. Entries with a derived size of zero are
+/// skipped (unsizeable). Names stay raw export-directory strings, never
+/// demangled.
+fn enumerate_exported_functions(
+    pe: &goblin::pe::PE,
+    sections: &[SectionInfo],
+) -> Vec<FunctionSymbol> {
+    // One entry per named, non-forwarded export in an executable section:
+    // `(rva, name)`, grouped by the section that contains the RVA.
+    let mut by_section: BTreeMap<usize, Vec<(u64, String)>> = BTreeMap::new();
+    for export in &pe.exports {
+        if export.reexport.is_some() {
+            continue; // a forwarder names a string, not this image's code
+        }
+        let Some(name) = export.name else {
+            continue; // ordinal-only export: no name to report
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let rva = u64::from(export.rva as u32);
+        let holding = sections.iter().position(|s| {
+            !s.no_bits
+                && s.executable
+                && s.size > 0
+                && rva >= s.addr
+                && rva < s.addr.saturating_add(s.size)
+        });
+        if let Some(idx) = holding {
+            by_section
+                .entry(idx)
+                .or_default()
+                .push((rva, name.to_string()));
+        }
+    }
+
+    let mut functions: Vec<FunctionSymbol> = Vec::new();
+    let mut seen: HashSet<(u64, u64)> = HashSet::new();
+    for (idx, mut sites) in by_section {
+        sites.sort();
+        let section = &sections[idx];
+        let hi = section.addr.saturating_add(section.size);
+        // The distinct RVAs in this section, ascending: consecutive
+        // distinct deltas are the derived sizes.
+        let mut distinct: Vec<u64> = sites.iter().map(|(rva, _)| *rva).collect();
+        distinct.dedup();
+        for (k, &rva) in distinct.iter().enumerate() {
+            let next = distinct.get(k + 1).copied().unwrap_or(hi);
+            let size = next.min(hi).saturating_sub(rva);
+            if size == 0 {
+                continue; // unsizeable: no range to fingerprint
+            }
+            for (_, name) in sites.iter().filter(|(r, _)| *r == rva) {
+                if !seen.insert((rva, size)) {
+                    continue; // alias of an already-listed range
+                }
+                let delta = usize::try_from(rva - section.addr).unwrap_or(usize::MAX);
+                functions.push(FunctionSymbol {
+                    name: name.clone(),
+                    addr: rva,
+                    size,
+                    file_offset: section.offset.saturating_add(delta),
+                });
+            }
+        }
+    }
+    functions.sort_by(|a, b| a.addr.cmp(&b.addr).then_with(|| a.name.cmp(&b.name)));
+    functions
 }
 
 /// Human-friendly architecture name from the COFF `machine` value, spelled

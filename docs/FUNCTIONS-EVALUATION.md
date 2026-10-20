@@ -4,24 +4,25 @@ This page reports how the committed per-function model (`model/functions.json`) 
 
 ## The dataset
 
-Per-function features extracted by `compid functions-batch --features` from **1008 unstripped ELF builds** (266791 functions). Every function inherits its build's manifest labels; nobody labels functions by hand.
+Per-function features extracted by `compid functions-batch --features` from **1297 builds with extractable functions** (342507 functions): ELF rows via the symbol table (or the stripped-x86-64 prologue heuristic), Mach-O rows via `LC_SYMTAB`, and PE rows via the export directory. Every function inherits its build's manifest labels; nobody labels functions by hand.
 
 | axis | builds (functions) |
 |------|--------------------|
-| compiler_family | clang (239835 fns), gcc (26956 fns) |
-| opt_level | O0 (394), O1 (65), O2 (410), O3 (65), Os (74) |
-| arch | aarch64 (98), arm (102), riscv64 (204), x86_64 (604) |
+| compiler_family | clang (315425 fns), gcc (27082 fns) |
+| opt_level | O0 (512), O1 (65), O2 (532), O3 (65), Os (74), Oz (49) |
+| arch | aarch64 (200), arm (102), riscv64 (204), x86_64 (791) |
+| os | linux (267626 fns), macos (74873 fns), windows (8 fns) |
 
 ## The hold-out is split by build, not by function
 
-The 266791 functions are not independent rows: the functions of one binary share padding, literal pools, and every per-build idiosyncrasy, so a per-function random split would leak a build into its own hold-out. The split shuffles whole build_ids (20% of builds held out, seed 42, stratified by the build's compiler_family) and every metric below is computed over the held-out builds' functions. All functions of a build sit on exactly one side of the split.
+The 342507 functions are not independent rows: the functions of one binary share padding, literal pools, and every per-build idiosyncrasy, so a per-function random split would leak a build into its own hold-out. The split shuffles whole build_ids (20% of builds held out, seed 42, stratified by the build's compiler_family) and every metric below is computed over the held-out builds' functions. All functions of a build sit on exactly one side of the split.
 
 ## Results (hold-out builds, per function)
 
 | field | classes | functions | top-1 | top-3 | macro-F1 | build majority top-1 |
 |-------|---------|-----------|-------|-------|----------|----------------------|
-| `compiler_family` | 2 | 61190 | 0.9970 | 1.0000 | 0.9944 | 0.9950 |
-| `opt_level` | 5 | 61190 | 0.8836 | 0.9997 | 0.6322 | 0.8317 |
+| `compiler_family` | 2 | 64016 | 0.9995 | 1.0000 | 0.9976 | 0.9885 |
+| `opt_level` | 6 | 64016 | 0.9204 | 0.9995 | 0.7542 | 0.8423 |
 
 The *build majority* column pools each held-out build's per-function votes and scores the winning class against the build's label - the operation `scripts/mixed_demo.sh` performs on a binary assembled from two toolchains. Per-function top-1 is the harder, unaggregated number.
 
@@ -37,7 +38,7 @@ One multinomial logistic regression per field (`LogisticRegression(max_iter=3000
 
 ## Stripped-binary boundaries — measured, not promised
 
-`compid functions` no longer refuses a stripped binary outright. For x86-64 ELF with no symbol table, two conservative scans over the executable sections propose function starts, and their union is merged by the same decode-aware overlap logic; extraction proceeds with synthesized `func_<hex addr>` names, marked `source: heuristic` in the JSON and by a header note in the table. Nothing is guessed for other architectures: a stripped non-x86-64 ELF, a PE, and a Mach-O still report their explicit reasons.
+`compid functions` no longer refuses a stripped binary outright. For x86-64 ELF with no symbol table, two conservative scans over the executable sections propose function starts, and their union is merged by the same decode-aware overlap logic; extraction proceeds with synthesized `func_<hex addr>` names, marked `source: heuristic` in the JSON and by a header note in the table. Nothing is guessed for other architectures: a stripped non-x86-64 ELF, a PE without an export table, and a Mach-O without a symbol table still report their explicit reasons.
 
 The first scan is the prologue-pattern set (one const array in `src/functions.rs`): `push rbp; mov rbp, rsp` and `push rbx; mov rbx, rdi` at 16-byte alignment, `endbr64` at any alignment with a frame-setup followup — and, at aligned sites, none — plus the paired-`lea` crt-stub shape and PLT-stub exclusions. The second scan is direct call-target analysis, which catches functions that lack a frame-setup prologue (cold clones, shrink-wrapped `-Os` entries): with the same length-aware x86-64 decoder the clean-window count uses, each executable section is disassembled linearly (skipping undecodable bytes one at a time), and every decoded direct `call rel32` (opcode `E8`) records the target `instruction address + instruction length + signed displacement` as a candidate start. A call target qualifies when it falls inside the scanned section (cross-section branches, e.g. into `.plt`, are thereby excluded, matching the prologue scan's PLT treatment), decodes cleanly for at least 16 bytes from the target, does not open with a PLT-stub shape (`endbr64; jmp *GOT`, bare `jmp *GOT` / `push *GOT`, or `push imm32; jmp rel32`), and is not already a prologue candidate. Direct `jmp rel32` (`E9`) targets were measured too and stay out: they add tail-thunk entries but far more loop back-edges and goto joins, which split otherwise-correct functions — with `E9` included the same sweep lands at precision 0.4334 / recall 0.9215 (F1 0.5896). The choice is pinned in one const (`CALL_TARGETS_INCLUDE_JMP`) in `src/functions.rs`, and the whole candidate union runs through the same merge pipeline, so a start found only by a call target is indistinguishable from a prologue start.
 
@@ -64,7 +65,7 @@ Recall is bounded, and that is the point of the conservative set: a missed funct
 
 ## Limitations
 
-- Stripped-binary boundaries are x86-64 ELF only, and heuristic recall is bounded by design (see the measured section above): prologue patterns plus direct call targets still miss sub-16-byte functions and functions reached only through indirect dispatch. PE/Mach-O symbol sources remain future work.
+- Function boundaries come from the container's symbol sources: the ELF symbol table (plus the stripped-x86-64 prologue heuristic), the PE export directory, and the Mach-O `LC_SYMTAB`. What yields no function rows: a PE without an export table (most plain Windows executables), a Mach-O without a symbol table, and a stripped non-x86-64 ELF. The PE rows are export-table functions only - the bulk of a DLL's internal (non-exported) functions is invisible to this path, and the last export of a section carries a section-end-derived size rather than a true one.
 - Every function of a build shares the build's labels. A function inlined from a vendored, differently-built library is labeled with its container's toolchain, not its true generator; the mixed-demo split is the sanity check that the model reads code shape, not container residue (functions carry no `sec:`, `ent:`, or `cmt:` features).
 - Same-toolchain-version bias as the whole-binary seed: a toolchain the matrix never saw will get confident wrong answers.
 - Small functions (under a few dozen bytes) carry little signal; their votes are near-noise, which is one reason the majority vote matters more than any single function's confidence.
