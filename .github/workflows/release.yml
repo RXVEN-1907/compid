@@ -1,19 +1,30 @@
-# Release pipeline: a pushed v* tag packages the CLI for two Linux targets
-# and publishes both tarballs (plus sha256 checksums) on a GitHub release.
+# Release pipeline: a pushed v* tag builds the CLI for every supported
+# platform and publishes all artifacts (plus sha256 checksums) on a GitHub
+# release.
 #
-# A Windows job shipping a PE tarball waits for PE extraction maturity.
+# Matrix, one job per build host:
+#   prep    - ubuntu x86_64: the host GNU build (also generates the shell
+#             completions every other job packages, since a cross binary
+#             cannot run on its build host)
+#   linux   - 10 more Linux targets (glibc, musl, arm, riscv64, loongarch64,
+#             powerpc64le, s390x) plus 3 Windows targets via cargo-zigbuild
+#   macos   - aarch64 + x86_64 + a universal2 fat binary, natively linked
+#             against Apple's SDK
+#   windows - x86_64-pc-windows-msvc, natively on a Windows runner, smoked
+#             for real (run + classify)
+#   bsd     - x86_64 FreeBSD and NetBSD via cross-rs (zig cannot supply a
+#             BSD libc, and these images ship the real thing)
 #
-# Cross-compile approach for aarch64 - zig cc as the linker, chosen over
-# cross-rs/cross deliberately: that repository publishes no reusable action
-# (no action.yml at its root, tags end at v0.2.5, so a cross@v10 pin would
-# not resolve), while zig needs no Docker, uses the same 0.14.1 pin the
-# corpus workflow installs, and only has to link - compid and all of its
-# dependencies are pure Rust, so there is no C to cross-compile. The
-# wrapper below rewrites -lgcc_s to -lunwind (the same rewrite
-# cargo-zigbuild applies): rustc no longer passes -lgcc_s on gnu targets,
-# but the rewrite keeps older or future rustc versions linking fine. This
-# exact wiring was verified end to end before being pinned here: a release
-# build of the crate produced a working ELF aarch64 binary.
+# Why cargo-zigbuild for the cross matrix: compid and all of its
+# dependencies are pure Rust, so zig only has to link; one tool covers
+# glibc, musl, mingw, and Apple's libc, needs no Docker, and matches the
+# zig the corpus workflows already pin. BSD keeps cross-rs because zig
+# ships no FreeBSD/NetBSD libc.
+#
+# Every archive is staged deterministically by scripts/package_release.py
+# (epoch mtimes, root owner, sorted entries, timestamp-free gzip), and the
+# binaries carry the models embedded at build time (src/model.rs), so each
+# artifact is a single self-contained directory: unpack, run.
 
 name: Release
 
@@ -25,17 +36,106 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+
+env:
+  COMPLETIONS_ARTIFACT: completions
+
 jobs:
-  dist:
-    name: Package (${{ matrix.target }})
+  prep:
+    name: Build (x86_64-linux-gnu) + completions
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Generate shell completions
+        run: |
+          mkdir completions-gen
+          for shell in bash zsh fish powershell; do
+            case "$shell" in
+              zsh)        out="_compid" ;;
+              powershell) out="compid.ps1" ;;
+              *)          out="compid.$shell" ;;
+            esac
+            ./target/release/compid completions "$shell" > "completions-gen/$out"
+          done
+          ls completions-gen
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python3 scripts/package_release.py \
+            --name "compid-$version-x86_64-unknown-linux-gnu" \
+            --binary target/release/compid \
+            --completions-dir completions-gen \
+            --out dist
+
+      - name: Smoke the packaged tarball
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          tarball="dist/compid-$version-x86_64-unknown-linux-gnu.tar.gz"
+          name="compid-$version-x86_64-unknown-linux-gnu"
+          unpacked="/tmp/dist-check/$name"
+          rm -rf /tmp/dist-check && mkdir /tmp/dist-check
+          tar -xzf "$tarball" -C /tmp/dist-check
+          "$unpacked/compid" --version
+          # Default model resolution, run from a repo-root working directory.
+          "$unpacked/compid" classify tests/fixtures/gcc13_O2_x86_64_pie_dynamic
+          # The released binary must be self-contained: no model file beside
+          # it, classify still works (embedded model).
+          ( cd /tmp && "$unpacked/compid" classify \
+              "$GITHUB_WORKSPACE/tests/fixtures/gcc13_O2_x86_64_pie_dynamic" \
+              | grep -q "trained" )
+          for f in LICENSE README.md CHANGELOG.md \
+                   docs/compid.1 docs/cli.md \
+                   completions/compid.bash completions/_compid \
+                   completions/compid.fish completions/compid.ps1; do
+            test -f "$unpacked/$f"
+          done
+          ( cd dist && sha256sum -c "$tarball.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: completions
+          path: completions-gen/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-x86_64-unknown-linux-gnu
+          path: dist/*
+          if-no-files-found: error
+
+  linux:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        # Windows (PE) tarball waits for PE extraction maturity.
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
           - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
+          - target: armv7-unknown-linux-gnueabihf
+          - target: arm-unknown-linux-gnueabihf
+          - target: i686-unknown-linux-gnu
+          - target: riscv64gc-unknown-linux-gnu
+          - target: loongarch64-unknown-linux-gnu
+          - target: powerpc64le-unknown-linux-gnu
+          - target: s390x-unknown-linux-gnu
+          - target: x86_64-pc-windows-gnu
+          - target: i686-pc-windows-gnu
+          - target: aarch64-pc-windows-gnullvm
     steps:
       - uses: actions/checkout@v4
 
@@ -47,98 +147,277 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install zig (aarch64 linker)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install cargo-zigbuild and zig
         run: |
-          mkdir -p "$HOME/.local/zig" "$HOME/.local/bin"
-          curl -fsSL https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz \
-            -o /tmp/zig.tar.xz
-          echo "24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c  /tmp/zig.tar.xz" \
-            | sha256sum -c -
-          tar -xf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
-          cat > "$HOME/.local/bin/zig-cc" <<'WRAPPER'
-          #!/usr/bin/env bash
-          args=()
-          for arg in "$@"; do
-            if [ "$arg" = "-lgcc_s" ]; then
-              args+=("-lunwind")
-            else
-              args+=("$arg")
-            fi
-          done
-          exec "$HOME/.local/zig/zig" cc -target aarch64-linux-gnu "${args[@]}"
-          WRAPPER
-          chmod +x "$HOME/.local/bin/zig-cc"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          pip install cargo-zigbuild ziglang
+          zigdir="$(python3 -c 'import ziglang, pathlib; print(pathlib.Path(ziglang.__file__).parent)')"
+          sudo ln -sf "$zigdir/zig" /usr/local/bin/zig
+          zig version
+          cargo zigbuild --version
 
-      - name: Build and package
-        run: ./scripts/dist.sh ${{ matrix.target }}
-        env:
-          # Ignored by the host job's build; cargo only reads the
-          # CARGO_TARGET_<triple>_LINKER variable for its matching target.
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: zig-cc
+      - name: Build
+        run: cargo zigbuild --release --target ${{ matrix.target }}
 
-      - name: Smoke the packaged tarball (host target)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.COMPLETIONS_ARTIFACT }}
+          path: completions-gen
+
+      - name: Package
         run: |
-          tarball="$(find dist -maxdepth 1 -name '*.tar.gz' -printf '%f\n')"
-          name="${tarball%.tar.gz}"
-          unpacked="/tmp/dist-check/$name"
-          rm -rf /tmp/dist-check && mkdir /tmp/dist-check
-          tar -xzf "dist/$tarball" -C /tmp/dist-check
-          "$unpacked/compid" --version
-          # Default model resolution, run from a repo-root working directory.
-          "$unpacked/compid" classify tests/fixtures/gcc13_O2_x86_64_pie_dynamic
-          # Explicit model pass, the docs-recommended form when classifying
-          # from elsewhere.
-          "$unpacked/compid" classify \
-            --model model/model.json tests/fixtures/gcc13_O2_x86_64_pie_dynamic
-          for f in LICENSE README.md CHANGELOG.md \
-                   docs/compid.1 docs/cli.md \
-                   completions/compid.bash completions/_compid \
-                   completions/compid.fish completions/compid.ps1; do
-            test -f "$unpacked/$f"
-          done
-          ( cd dist && sha256sum -c "$tarball.sha256" )
+          version="${GITHUB_REF_NAME#v}"
+          format=tar.gz
+          exe=compid
+          case "${{ matrix.target }}" in
+            *windows*) format=zip; exe=compid.exe ;;
+          esac
+          python3 scripts/package_release.py \
+            --name "compid-$version-${{ matrix.target }}" \
+            --binary "target/${{ matrix.target }}/release/$exe" \
+            --completions-dir completions-gen \
+            --format "$format" \
+            --out dist
 
-      - name: Sanity-check the packaged aarch64 binary
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Smoke (x86_64 musl is static and runs here)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
-          tarball="$(find dist -maxdepth 1 -name '*.tar.gz' -printf '%f\n')"
-          name="${tarball%.tar.gz}"
-          rm -rf /tmp/dist-check && mkdir /tmp/dist-check
-          tar -xzf "dist/$tarball" -C /tmp/dist-check
-          # No execution smoke: that needs qemu plus the target glibc. The
-          # architecture check is the honest minimum here.
-          info="$(file "/tmp/dist-check/$name/compid")"
-          echo "$info"
-          echo "$info" | grep -q 'aarch64'
-          test -f "/tmp/dist-check/$name/completions/_compid"
+          version="${GITHUB_REF_NAME#v}"
+          unpacked="/tmp/dist-check/compid-$version-x86_64-unknown-linux-musl"
+          rm -rf /tmp/dist-check && mkdir -p /tmp/dist-check
+          tar -xzf "dist/compid-$version-x86_64-unknown-linux-musl.tar.gz" -C /tmp/dist-check
+          ( cd /tmp && "$unpacked/compid" --version \
+              && "$unpacked/compid" classify \
+                "$GITHUB_WORKSPACE/tests/fixtures/gcc13_O2_x86_64_pie_dynamic" \
+                | grep -q "trained" )
+
+      - name: Architecture check (cross ELF binaries)
+        if: matrix.target != 'x86_64-unknown-linux-musl'
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          f="dist/compid-$version-${{ matrix.target }}.tar.gz"
+          case "${{ matrix.target }}" in
+            *windows*)
+              python3 - "$f" <<'PY'
+              import sys, zipfile
+              names = zipfile.ZipFile(sys.argv[1]).namelist()
+              assert any(n.endswith("/compid.exe") for n in names), names
+              PY
+              ;;
+            *)
+              rm -rf /tmp/dist-check && mkdir /tmp/dist-check
+              tar -xzf "$f" -C /tmp/dist-check
+              bin="/tmp/dist-check/compid-$version-${{ matrix.target }}/compid"
+              mach="$(readelf -h "$bin" | awk -F: '/Machine:/{gsub(/^ +/,"",$2); print $2}')"
+              echo "readelf machine: $mach"
+              case "${{ matrix.target }}" in
+                x86_64-*)      expect="Advanced Micro Devices X86-64" ;;
+                aarch64-*)     expect="AArch64" ;;
+                armv7-*|arm-*) expect="ARM" ;;
+                i686-*)        expect="Intel 80386" ;;
+                riscv64*)      expect="RISC-V" ;;
+                loongarch64*)  expect="LoongArch" ;;
+                powerpc64le*)  expect="PowerPC64" ;;
+                s390x*)        expect="IBM S/390" ;;
+                *)             echo "unexpected target"; exit 1 ;;
+              esac
+              echo "$mach" | grep -qF "$expect"
+              ;;
+          esac
 
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
-          path: |
-            dist/*.tar.gz
-            dist/*.tar.gz.sha256
+          path: dist/*
           if-no-files-found: error
 
-  release:
-    name: Publish GitHub release
-    needs: dist
-    runs-on: ubuntu-latest
+  macos:
+    name: Build (macOS aarch64 + x86_64 + universal2)
+    runs-on: macos-latest
+    timeout-minutes: 45
     steps:
-      - name: Download both artifact sets
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
+          targets: x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+
+      - name: Build both architectures
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          lipo -create \
+            target/aarch64-apple-darwin/release/compid \
+            target/x86_64-apple-darwin/release/compid \
+            -output compid-universal2
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.COMPLETIONS_ARTIFACT }}
+          path: completions-gen
+
+      - name: Package all three
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for variant in aarch64 x86_64 universal2; do
+            case "$variant" in
+              aarch64)    bin=target/aarch64-apple-darwin/release/compid ;;
+              x86_64)     bin=target/x86_64-apple-darwin/release/compid ;;
+              universal2) bin=compid-universal2 ;;
+            esac
+            python3 scripts/package_release.py \
+              --name "compid-$version-$variant-apple-darwin" \
+              --binary "$bin" \
+              --completions-dir completions-gen \
+              --out dist
+          done
+
+      - name: Smoke (host arch runs)
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          unpacked="/tmp/dist-check/compid-$version-aarch64-apple-darwin"
+          rm -rf /tmp/dist-check && mkdir -p /tmp/dist-check
+          tar -xzf "dist/compid-$version-aarch64-apple-darwin.tar.gz" -C /tmp/dist-check
+          ( cd /tmp && "$unpacked/compid" --version \
+              && "$unpacked/compid" classify \
+                "$GITHUB_WORKSPACE/tests/fixtures/gcc13_O2_x86_64_pie_dynamic" \
+                | grep -q "trained" )
+          file compid-universal2 | grep -q "universal"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Build (x86_64-windows-msvc)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-msvc
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run the test suite
+        run: cargo test --all
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.COMPLETIONS_ARTIFACT }}
+          path: completions-gen
+
+      - name: Package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python3 scripts/package_release.py \
+            --name "compid-$version-x86_64-pc-windows-msvc" \
+            --binary target/release/compid.exe \
+            --completions-dir completions-gen \
+            --format zip \
+            --out dist
+
+      - name: Smoke (run the packaged exe for real)
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          rm -rf /tmp/dist-check && mkdir -p /tmp/dist-check
+          tar -xf "dist/compid-$version-x86_64-pc-windows-msvc.zip" -C /tmp/dist-check
+          /tmp/dist-check/compid-$version-x86_64-pc-windows-msvc/compid.exe --version
+          /tmp/dist-check/compid-$version-x86_64-pc-windows-msvc/compid.exe classify \
+            tests/fixtures/gcc13_O2_x86_64_pie_dynamic | grep -q "trained"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-x86_64-pc-windows-msvc
+          path: dist/*
+          if-no-files-found: error
+
+  bsd:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-freebsd
+          - target: x86_64-unknown-netbsd
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build
+        run: cross build --release --target ${{ matrix.target }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.COMPLETIONS_ARTIFACT }}
+          path: completions-gen
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python3 scripts/package_release.py \
+            --name "compid-$version-${{ matrix.target }}" \
+            --binary "target/${{ matrix.target }}/release/compid" \
+            --completions-dir completions-gen \
+            --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [prep, linux, macos, windows, bsd]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
           merge-multiple: true
           path: dist
+
+      - name: Combined checksums
+        run: |
+          cd dist
+          rm -f *.sha256
+          ls *.tar.gz *.zip | sort | xargs sha256sum > "sha256sums-${GITHUB_REF_NAME}.txt"
+          cat "sha256sums-${GITHUB_REF_NAME}.txt"
 
       - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: .github/release-body.md
+          fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
-            dist/*.tar.gz.sha256
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+            dist/*.zip
+            dist/sha256sums-*.txt
