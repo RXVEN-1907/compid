@@ -134,7 +134,8 @@ jobs:
           - target: i686-unknown-linux-gnu
           - target: riscv64gc-unknown-linux-gnu
           - target: loongarch64-unknown-linux-gnu
-          - target: powerpc64le-unknown-linux-gnu
+          - target: powerpc64le-unknown-linux-gnu.2.19
+            build: powerpc64le-unknown-linux-gnu
           - target: s390x-unknown-linux-gnu
           - target: x86_64-pc-windows-gnu
           - target: i686-pc-windows-gnu
@@ -144,11 +145,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.build || matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.build || matrix.target }}
 
       - name: Install cargo-zigbuild and zig
         run: |
@@ -170,12 +171,15 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           format=tar.gz
           exe=compid
+          # zig names the build dir after the base triple; the glibc pin
+          # (powerpc64le only) lives in matrix.target but not on disk.
+          build="${{ matrix.build || matrix.target }}"
           case "${{ matrix.target }}" in
             *windows*) format=zip; exe=compid.exe ;;
           esac
           python3 scripts/package_release.py \
             --name "compid-$version-${{ matrix.target }}" \
-            --binary "target/${{ matrix.target }}/release/$exe" \
+            --binary "target/$build/release/$exe" \
             --completions-dir completions-gen \
             --format "$format" \
             --out dist
@@ -192,16 +196,17 @@ jobs:
                 "$GITHUB_WORKSPACE/tests/fixtures/gcc13_O2_x86_64_pie_dynamic" \
                 | grep -q "trained" )
 
-      - name: Architecture check (cross ELF binaries)
+      - name: Architecture check (cross binaries)
         if: matrix.target != 'x86_64-unknown-linux-musl'
         run: |
           version="${GITHUB_REF_NAME#v}"
-          f="dist/compid-$version-${{ matrix.target }}.tar.gz"
           case "${{ matrix.target }}" in
             *windows*)
+              f="dist/compid-$version-${{ matrix.target }}.zip"
               python3 -c "import sys, zipfile; assert any(n.endswith('/compid.exe') for n in zipfile.ZipFile(sys.argv[1]).namelist()), 'no compid.exe in zip'" "$f"
               ;;
             *)
+              f="dist/compid-$version-${{ matrix.target }}.tar.gz"
               rm -rf /tmp/dist-check && mkdir /tmp/dist-check
               tar -xzf "$f" -C /tmp/dist-check
               bin="/tmp/dist-check/compid-$version-${{ matrix.target }}/compid"

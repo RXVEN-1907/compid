@@ -87,7 +87,10 @@ def normalize(root: Path, exe: Path) -> None:
 
 
 def sorted_members(root: Path) -> list[Path]:
-    return sorted(root.rglob("*"), key=lambda p: (p.is_dir(), str(p.relative_to(root))))
+    # Directories sort before their contents: python's zipfile extractor
+    # creates members in archive order and chokes if a directory entry
+    # arrives after files it would have contained.
+    return sorted(root.rglob("*"), key=lambda p: (not p.is_dir(), str(p.relative_to(root))))
 
 
 def write_tar_gz(root: Path, name: str, out_dir: Path) -> Path:
@@ -119,7 +122,12 @@ def write_zip(root: Path, name: str, out_dir: Path) -> Path:
     dest = out_dir / f"{name}.zip"
     with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for p in sorted_members(root):
-            arc = f"{name}/{p.relative_to(root).as_posix()}"
+            rel = p.relative_to(root).as_posix()
+            # Directory entries need the trailing slash - python's zipfile
+            # decides dir-ness by that suffix alone, and without it the
+            # extractor creates a file named "completions" and then fails
+            # to put "completions/README" inside it.
+            arc = f"{name}/{rel}{'/' if p.is_dir() else ''}"
             zi = zipfile.ZipInfo(arc, date_time=(1980, 1, 1, 0, 0, 0))
             mode = 0o755 if p.is_dir() or p.name == "compid.exe" else 0o644
             zi.external_attr = (mode << 16) | (0x10 if p.is_dir() else 0)
