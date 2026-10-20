@@ -13,10 +13,11 @@
 //! relocatable objects): SHT_SYMTAB entries of type STT_FUNC with a nonzero
 //! `st_size`, deduplicated by `(st_value, st_size)`, raw (never demangled)
 //! names. For a stripped x86-64 ELF: a conservative prologue scan over the
-//! executable sections (see [`PROLOGUE_PATTERNS`]), with synthesized
-//! `func_<hex addr>` names. PE and Mach-O symbol sources remain future
-//! work; a PE, a Mach-O, or a non-x86-64 stripped ELF yields an empty
-//! function list with a reason string instead of guessing boundaries.
+//! executable sections (see [`PROLOGUE_PATTERNS`]) unioned with direct
+//! call-target analysis (see [`collect_direct_branch_targets`]), with
+//! synthesized `func_<hex addr>` names. PE and Mach-O symbol sources remain
+//! future work; a PE, a Mach-O, or a non-x86-64 stripped ELF yields an
+//! empty function list with a reason string instead of guessing boundaries.
 
 use crate::elfinfo::{ElfInfo, FunctionSymbol};
 use crate::features::{disassemble_window, log2_size, Labels, WINDOW_SIZE};
@@ -52,8 +53,9 @@ pub enum FunctionSource {
     /// ELF symbol table (SHT_SYMTAB function symbols): unstripped ELF and
     /// relocatable objects.
     SymbolTable,
-    /// Conservative prologue-pattern scan over the executable sections of a
-    /// stripped x86-64 ELF; names are synthesized (`func_<hex addr>`).
+    /// Conservative prologue-pattern scan plus direct call-target analysis
+    /// over the executable sections of a stripped x86-64 ELF; names are
+    /// synthesized (`func_<hex addr>`).
     Heuristic,
 }
 
@@ -358,19 +360,15 @@ fn merges_into(bytes: &[u8], a: u64, b: u64) -> bool {
     true
 }
 
-/// Scan one executable byte range for candidate function starts. Returns
-/// `(offset, size)` pairs into `bytes`, ordered by offset: `offset` is
-/// where the function starts, `size` runs to the next candidate or the end
-/// of the range. Offset 0 is always a candidate (when it disassembles and
-/// is not a PLT stub shape) - the linker places a function at a section
-/// start by construction. Candidates that are part of an earlier
-/// candidate's code (see [`merges_into`]) merge into it; candidates whose
-/// first [`PROLOGUE_DECODE_DEPTH`] bytes fail to disassemble cleanly, or
-/// whose slice is shorter than [`FUNCTION_MIN_SIZE`], are dropped.
-/// `base_addr` is the virtual address of `bytes[0]` and drives the
-/// alignment gate.
-pub fn scan_prologue_candidates(bytes: &[u8], base_addr: u64) -> Vec<(u64, u64)> {
-    // Raw pattern hits, in file order.
+/// The prologue scan's raw pattern hits over one executable byte range, in
+/// file order and unsorted: every [`PROLOGUE_PATTERNS`] match that survives
+/// its alignment, followup, and PLT-shape gates, plus offset 0 (the linker
+/// places a function at an executable section start by construction, unless
+/// the section opens with a PLT stub shape). Split from
+/// [`scan_prologue_candidates`] so the call-target collector can union its
+/// own hits into the same pipeline; `base_addr` is the virtual address of
+/// `bytes[0]` and drives the alignment gate.
+fn prologue_hits(bytes: &[u8], base_addr: u64) -> Vec<u64> {
     let mut hits: Vec<u64> = Vec::new();
     for pattern in PROLOGUE_PATTERNS {
         let plen = pattern.bytes.len();
@@ -413,12 +411,119 @@ pub fn scan_prologue_candidates(bytes: &[u8], base_addr: u64) -> Vec<(u64, u64)>
     if !bytes.is_empty() && !is_plt_stub_lead(bytes) && !is_plt_stub_after_endbr64(after_lead) {
         hits.push(0);
     }
+    hits
+}
+
+/// Whether direct `jmp rel32` (E9) targets join `call rel32` (E8) targets
+/// in the call-target candidate set. E9 targets may include tail-call
+/// thunks (a real `jmp other_function` entry), but they also include every
+/// long-range intra-function branch - loop back edges and goto joins -
+/// which splits otherwise-correct functions and costs far more precision
+/// than the thunks add recall. Both modes were measured on the 40-binary
+/// sweep (see docs/FUNCTIONS-EVALUATION.md): E8-only lands at pooled F1
+/// 0.9486 (precision 0.9819, recall 0.9174); adding E9 targets drops
+/// precision to 0.4334 for a recall of 0.9215 (F1 0.5896). E8-only keeps
+/// the better F1, so E9 targets stay out.
+const CALL_TARGETS_INCLUDE_JMP: bool = false;
+
+/// One direct branch target found by the linear sweep: a decoded 5-byte
+/// instruction opening with the opcode byte (`E8` call rel32, or `E9` jmp
+/// rel32 when `include_jmp`), as a section-relative offset. A target is
+/// recorded only when it falls inside the scanned range - cross-section
+/// branches (into `.plt`, for instance) are thereby excluded, which is the
+/// PLT exclusion for call targets that section boundaries already give the
+/// prologue scan. Targets may include tail-thunks and mid-function branch
+/// labels; the qualification filters (see [`call_target_hits`]) and the
+/// overlap merge decide what survives.
+fn collect_direct_branch_targets(bytes: &[u8], include_jmp: bool) -> Vec<u64> {
+    let decoder = InstDecoder::default();
+    let mut targets: Vec<u64> = Vec::new();
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let inst = match decoder.decode_slice(&bytes[off..]) {
+            Ok(inst) => inst,
+            // Undecodable byte: skip it and resynchronize, the same
+            // recovery the window disassembler applies per window.
+            Err(_) => {
+                off += 1;
+                continue;
+            }
+        };
+        let len = LengthedInstruction::len(&inst).to_const() as usize;
+        if len == 0 || off + len > bytes.len() {
+            // A zero-length decode or an instruction running past the end
+            // of the section is not trustworthy; advance one byte.
+            off += 1;
+            continue;
+        }
+        // The length-aware linear decode guarantees `off` is an instruction
+        // boundary, so a 5-byte instruction opening with E8/E9 is exactly
+        // the direct rel32 form: opcode byte, then a signed 32-bit
+        // displacement relative to the next instruction.
+        if len == 5 && (bytes[off] == 0xE8 || (include_jmp && bytes[off] == 0xE9)) {
+            let disp = i32::from_le_bytes([
+                bytes[off + 1],
+                bytes[off + 2],
+                bytes[off + 3],
+                bytes[off + 4],
+            ]);
+            // `next` is at most the section length (well under i64::MAX) and
+            // `disp` fits in i32, so the sum cannot overflow.
+            let next = (off + 5) as i64;
+            let target = next + i64::from(disp);
+            if target >= 0 && (target as u64) < bytes.len() as u64 {
+                targets.push(target as u64);
+            }
+        }
+        off += len;
+    }
+    targets.sort_unstable();
+    targets.dedup();
+    targets
+}
+
+/// True when the bytes at a call-target site open with a PLT-stub shape,
+/// the same exclusion the prologue scan applies to its candidates: an
+/// `endbr64` followed by `jmp *GOT(%rip)` (plain or `bnd`), a bare
+/// `jmp *GOT` / `push *GOT` lead, or the index-push form
+/// `push imm32; jmp rel32`.
+fn is_plt_stub_shape_at(site: &[u8]) -> bool {
+    if site.starts_with(b"\xf3\x0f\x1e\xfa") && is_plt_stub_after_endbr64(&site[4..]) {
+        return true;
+    }
+    if is_plt_stub_lead(site) {
+        return true;
+    }
+    site.len() >= 6 && site.starts_with(b"\x68") && site[5] == 0xe9
+}
+
+/// The call-target hits that qualify as candidate function starts: of
+/// [`collect_direct_branch_targets`]'s raw targets, only those whose first
+/// [`PROLOGUE_DECODE_DEPTH`] bytes disassemble cleanly (a jump-table-looking
+/// byte sequence fails here and yields no start) and whose site does not
+/// open with a PLT-stub shape. Sorted and deduplicated.
+fn call_target_hits(bytes: &[u8], include_jmp: bool) -> Vec<u64> {
+    let decoder = InstDecoder::default();
+    collect_direct_branch_targets(bytes, include_jmp)
+        .into_iter()
+        .filter(|&t| {
+            let site = &bytes[t as usize..];
+            prologue_decodes(&decoder, site) && !is_plt_stub_shape_at(site)
+        })
+        .collect()
+}
+
+/// The decode-aware overlap merge shared by every candidate source: sort,
+/// deduplicate, drop candidates that are part of an earlier candidate's code
+/// ([`merges_into`]) or whose first [`PROLOGUE_DECODE_DEPTH`] bytes fail to
+/// disassemble cleanly, then give each survivor the range to the next
+/// candidate (or the range end) and drop survivors shorter than
+/// [`FUNCTION_MIN_SIZE`]. Returns `(offset, size)` pairs into `bytes`,
+/// ordered by offset.
+fn merge_and_size_candidates(bytes: &[u8], mut hits: Vec<u64>) -> Vec<(u64, u64)> {
     hits.sort_unstable();
     hits.dedup();
 
-    // Merge candidates that are part of an earlier candidate's code, and
-    // keep only candidates whose first PROLOGUE_DECODE_DEPTH bytes
-    // disassemble cleanly.
     let decoder = InstDecoder::default();
     let mut starts: Vec<u64> = Vec::new();
     for h in hits {
@@ -432,8 +537,6 @@ pub fn scan_prologue_candidates(bytes: &[u8], base_addr: u64) -> Vec<(u64, u64)>
         }
     }
 
-    // Each surviving function runs to the next candidate (or the range
-    // end) and must hold at least FUNCTION_MIN_SIZE bytes.
     let mut out: Vec<(u64, u64)> = Vec::new();
     for (n, &start) in starts.iter().enumerate() {
         let next = starts.get(n + 1).copied().unwrap_or(bytes.len() as u64);
@@ -446,11 +549,36 @@ pub fn scan_prologue_candidates(bytes: &[u8], base_addr: u64) -> Vec<(u64, u64)>
     out
 }
 
+/// Scan one executable byte range for candidate function starts from the
+/// prologue patterns alone. Returns `(offset, size)` pairs into `bytes`,
+/// ordered by offset: `offset` is where the function starts, `size` runs to
+/// the next candidate or the end of the range. Candidates that are part of
+/// an earlier candidate's code (see [`merges_into`]) merge into it;
+/// candidates whose first [`PROLOGUE_DECODE_DEPTH`] bytes fail to
+/// disassemble cleanly, or whose slice is shorter than
+/// [`FUNCTION_MIN_SIZE`], are dropped.
+pub fn scan_prologue_candidates(bytes: &[u8], base_addr: u64) -> Vec<(u64, u64)> {
+    merge_and_size_candidates(bytes, prologue_hits(bytes, base_addr))
+}
+
+/// The full stripped-binary candidate scan: prologue-pattern hits unioned
+/// with direct call-target hits, run through the same decode-aware overlap
+/// merge. A start found only by a call target gets the same synthesized
+/// `func_<hex addr>` name scheme - the merge is address-based and treats
+/// both sources identically, and a call target at an address a prologue
+/// pattern already proposed collapses onto it.
+pub fn scan_heuristic_candidates(bytes: &[u8], base_addr: u64) -> Vec<(u64, u64)> {
+    let mut hits = prologue_hits(bytes, base_addr);
+    hits.extend(call_target_hits(bytes, CALL_TARGETS_INCLUDE_JMP));
+    merge_and_size_candidates(bytes, hits)
+}
+
 /// Function boundaries for a stripped x86-64 ELF: run
-/// [`scan_prologue_candidates`] over every executable, byte-backed section
-/// and name each candidate `func_<hex virtual address>`. Returns functions
-/// ordered by address. Empty when the binary exposes no executable section
-/// bytes or the scan finds nothing.
+/// [`scan_heuristic_candidates`] (prologue patterns plus direct call
+/// targets) over every executable, byte-backed section and name each
+/// candidate `func_<hex virtual address>`. Returns functions ordered by
+/// address. Empty when the binary exposes no executable section bytes or
+/// the scan finds nothing.
 pub fn heuristic_functions(info: &ElfInfo) -> Vec<FunctionSymbol> {
     let mut out: Vec<FunctionSymbol> = Vec::new();
     for section in &info.sections {
@@ -461,7 +589,7 @@ pub fn heuristic_functions(info: &ElfInfo) -> Vec<FunctionSymbol> {
         if bytes.is_empty() {
             continue;
         }
-        for (start, size) in scan_prologue_candidates(&bytes, section.addr) {
+        for (start, size) in scan_heuristic_candidates(&bytes, section.addr) {
             // Both additions saturate: `addr` is an untrusted sh_addr plus a
             // scan offset, and a crafted header can carry u64::MAX values.
             let addr = section.addr.saturating_add(start);
@@ -490,7 +618,8 @@ pub fn extract_elf(info: &ElfInfo) -> FunctionsExtraction {
     let build_id = info.build_id.clone();
 
     if info.functions.is_empty() && !info.has_symtab && info.labels.arch == "x86-64" {
-        // Stripped x86-64: the prologue heuristic owns the boundaries.
+        // Stripped x86-64: the boundary heuristic (prologue patterns plus
+        // call targets) owns the boundaries.
         let functions = heuristic_functions(info)
             .into_iter()
             .map(|fs| FunctionFeatures {
@@ -501,7 +630,7 @@ pub fn extract_elf(info: &ElfInfo) -> FunctionsExtraction {
             })
             .collect::<Vec<_>>();
         let reason = functions.is_empty().then(|| {
-            "no symbol table: binary looks stripped, and the prologue \
+            "no symbol table: binary looks stripped, and the stripped-binary \
              heuristic found no candidate function starts in the executable \
              sections"
                 .to_string()
@@ -906,6 +1035,169 @@ mod tests {
         text.resize(80, 0x90);
         let found = scan_prologue_candidates(&text, 0);
         assert_eq!(found, vec![(16, 32), (48, 32)]);
+    }
+
+    // ---- call-target collector, on synthetic .text blobs ----
+
+    /// 16 bytes of plausible filler prefixed by one invalid byte, so the
+    /// section-start candidate never survives: the sweep starts decoding at
+    /// offset 1 and reaches offset 16 on instruction boundaries.
+    fn sweepable_prefix() -> Vec<u8> {
+        let mut text = vec![0x06]; // push es: invalid in 64-bit mode
+        text.extend_from_slice(&filler()[1..]);
+        text
+    }
+
+    #[test]
+    fn a_direct_call_yields_its_target_as_a_start() {
+        let mut text = sweepable_prefix();
+        // call +11 at offset 16: next instruction at 21, target 21 + 11 = 32.
+        text.extend_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00]);
+        text.resize(32, 0x90);
+        // The target opens with bytes matching no prologue pattern, so only
+        // call-target analysis can propose it.
+        text.extend_from_slice(&[0x31, 0xc0, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3]); // xor eax,eax; mov eax,0x2a; ret
+        text.resize(64, 0x90);
+
+        assert_eq!(
+            collect_direct_branch_targets(&text, false),
+            vec![32],
+            "the E8 at offset 16 targets offset 32"
+        );
+        assert!(
+            scan_prologue_candidates(&text, 0).is_empty(),
+            "no prologue pattern fires on this blob"
+        );
+        assert_eq!(
+            scan_heuristic_candidates(&text, 0),
+            vec![(32, 32)],
+            "the call target becomes the only function start"
+        );
+    }
+
+    #[test]
+    fn a_target_that_fails_the_decode_check_yields_nothing() {
+        let mut text = sweepable_prefix();
+        // call +11 at offset 16: target 32, which holds a jump-table-looking
+        // island (ff-ff 00-00 entries) that cannot disassemble.
+        text.extend_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00]);
+        text.resize(32, 0x90);
+        text.extend_from_slice(&[0xff, 0xff, 0x00, 0x00]); // x4: jump-table-like
+        text.extend_from_slice(&[0xff, 0xff, 0x00, 0x00]);
+        text.extend_from_slice(&[0xff, 0xff, 0x00, 0x00]);
+        text.extend_from_slice(&[0xff, 0xff, 0x00, 0x00]);
+        text.resize(64, 0x90);
+
+        assert_eq!(
+            collect_direct_branch_targets(&text, false),
+            vec![32],
+            "the raw E8 target is collected at offset 32"
+        );
+        assert!(
+            scan_heuristic_candidates(&text, 0).is_empty(),
+            "undecodable target bytes are filtered before the merge"
+        );
+    }
+
+    #[test]
+    fn a_call_target_at_a_prologue_address_collapses_onto_it() {
+        let mut text = sweepable_prefix();
+        // call +11 at offset 16: target 32, which also carries an aligned
+        // frame-pointer prologue - both sources propose the same start.
+        text.extend_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00]);
+        text.resize(32, 0x90);
+        text.extend_from_slice(&[0x55, 0x48, 0x89, 0xe5]); // push rbp; mov rbp,rsp @32
+        text.extend_from_slice(&[0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3]); // mov eax,0x2a; ret
+        text.resize(64, 0x90);
+
+        assert_eq!(
+            scan_prologue_candidates(&text, 0),
+            vec![(32, 32)],
+            "the prologue scan alone finds offset 32"
+        );
+        assert_eq!(
+            scan_heuristic_candidates(&text, 0),
+            vec![(32, 32)],
+            "the union collapses the duplicate into one start"
+        );
+    }
+
+    #[test]
+    fn a_call_target_inside_a_prologue_start_merges_into_it() {
+        // A call whose target sits 4 bytes after an aligned prologue start,
+        // with no terminator between: the target is part of the prologue
+        // start's code, so the merge keeps only the earlier start.
+        let mut text = vec![0x06];
+        text.extend_from_slice(&[0xb8, 0x00, 0x00, 0x00, 0x00]); // mov eax,0 @1 (len 5)
+        text.extend_from_slice(&[0x90, 0x90]); // @6
+        text.extend_from_slice(&[0xe8, 0x07, 0x00, 0x00, 0x00]); // call +7 @8: next 13, target 20
+        text.extend_from_slice(&[0x90, 0x90, 0x90]); // @13
+        text.extend_from_slice(&[0x55, 0x48, 0x89, 0xe5]); // push rbp; mov rbp,rsp @16
+        text.extend_from_slice(&[0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3]); // @20: mov eax,0x2a; ret
+        text.resize(64, 0x90);
+
+        assert_eq!(
+            collect_direct_branch_targets(&text, false),
+            vec![20],
+            "the raw call target is offset 20"
+        );
+        assert_eq!(
+            scan_heuristic_candidates(&text, 0),
+            vec![(16, 48)],
+            "the target merges into the prologue start at 16; one function"
+        );
+    }
+
+    #[test]
+    fn branch_target_collection_follows_the_jmp_switch() {
+        // The same call/jmp opcode placement with the include-jmp switch on
+        // and off: E8 targets are always collected, E9 targets only when
+        // asked (the shipped mode is decided by the sweep and pinned in
+        // CALL_TARGETS_INCLUDE_JMP).
+        let mut text = sweepable_prefix();
+        text.extend_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00]); // call +11 @16
+        text.extend_from_slice(&[0xe9, 0x0b, 0x00, 0x00, 0x00]); // jmp +11 @21
+        text.resize(64, 0x90);
+        // 0x06-style fillers end; make the tail decode cleanly.
+        text.extend_from_slice(&[0x31, 0xc0, 0xc3]); // xor eax,eax; ret
+        text.resize(96, 0x90);
+
+        assert_eq!(
+            collect_direct_branch_targets(&text, false),
+            vec![32],
+            "E8-only: one target"
+        );
+        // jmp @21: next 26, +11 -> target 37. Both targets collected in the
+        // one set, sorted.
+        assert_eq!(
+            collect_direct_branch_targets(&text, true),
+            vec![32, 37],
+            "E8+E9: both direct rel32 targets"
+        );
+    }
+
+    #[test]
+    fn start_collection_is_deterministic() {
+        // The same blob through the union scan twice, and through the raw
+        // collector twice: identical start sets, no order leakage from the
+        // hit sources (prologue hits land after call targets in the union's
+        // input order; the merge sorts).
+        let mut text = sweepable_prefix();
+        text.extend_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00]); // call @16 -> 32
+        text.resize(32, 0x90);
+        text.extend_from_slice(&[0x31, 0xc0, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3]);
+        text.resize(64, 0x90);
+        text.extend_from_slice(&[0x55, 0x48, 0x89, 0xe5]); // aligned prologue @64
+        text.resize(96, 0x90);
+
+        let first = scan_heuristic_candidates(&text, 0);
+        let second = scan_heuristic_candidates(&text, 0);
+        assert_eq!(first, second, "same input, same start set");
+        assert_eq!(first, vec![(32, 32), (64, 32)]);
+        assert_eq!(
+            collect_direct_branch_targets(&text, false),
+            collect_direct_branch_targets(&text, false),
+        );
     }
 
     #[test]

@@ -165,11 +165,11 @@ op_inc                  0x1cf0     9  clang        1.00   O0           1.00
 ```
 
 A stripped x86-64 ELF takes the fallback path: a conservative prologue scan
-over the executable sections proposes the function starts (see
-`docs/FUNCTIONS-EVALUATION.md` for the measured precision and recall), each
-start is named `func_<hex addr>`, and the table carries a header note -
-`function boundaries: prologue heuristic (stripped binary)` - so synthesized
-names are never mistaken for symbol names. The `--json` output marks the
+plus direct call-target analysis over the executable sections proposes the
+function starts (see `docs/FUNCTIONS-EVALUATION.md` for the measured
+precision and recall), each start is named `func_<hex addr>`, and the table
+carries a header note - `function boundaries: prologue heuristic (stripped
+binary)` - so synthesized names are never mistaken for symbol names. The `--json` output marks the
 source explicitly (`"source": "heuristic"` versus `"symbol_table"`). A
 stripped non-x86-64 ELF, a PE, and a Mach-O still print their explicit
 reasons instead of a table and exit 0. `--model` defaults to

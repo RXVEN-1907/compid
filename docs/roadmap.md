@@ -15,15 +15,16 @@ feeds `training/train_functions.py`, whose hold-out splits by build. The
 mixed-toolchain proof runs mechanically as `scripts/mixed_demo.sh`.
 
 Stripped x86-64 ELF is done too, measured rather than promised: a
-conservative prologue scan proposes the boundaries (`source: heuristic`,
-synthesized `func_<hex addr>` names), `compid functions <BIN> --measure`
-scores it against symbol ground truth at a ±8-byte tolerance, and the
-40-binary O0-Os sweep lands at pooled precision 0.9806 / recall 0.8588
-(F1 0.9157) - numbers and residual misses documented in
-`docs/FUNCTIONS-EVALUATION.md`. `scripts/mixed_demo.sh` extends the
-majority assertion to a `strip`ped copy of the mixed binary and holds.
-Still ahead: PE/Mach-O symbol sources and call-target analysis for the
-prologues no pattern set can see, after which the output is a complete
+conservative prologue scan unioned with direct call-target analysis
+proposes the boundaries (`source: heuristic`, synthesized `func_<hex addr>`
+names), `compid functions <BIN> --measure` scores it against symbol ground
+truth at a ±8-byte tolerance, and the 40-binary O0-Os sweep lands at pooled
+precision 0.9819 / recall 0.9174 (F1 0.9486), up from 0.9806 / 0.8588
+(F1 0.9157) for the prologue scan alone - numbers and residual misses
+documented in `docs/FUNCTIONS-EVALUATION.md`. `scripts/mixed_demo.sh`
+extends the majority assertion to a `strip`ped copy of the mixed binary
+and holds. Call-target analysis is done; still ahead for the function-level
+item: PE/Mach-O symbol sources, after which the output is a complete
 per-function provenance table for binaries assembled from mixed toolchains
 and vendored libraries.
 

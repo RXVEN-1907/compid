@@ -49,7 +49,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acceptance script runs its gcc/zig majority assertion on a `strip`ped
   copy too (attribution by address against the unstripped run). Non-x86-64
   ELFs, PEs, and Mach-Os keep their explicit reasons; PE/Mach-O symbol
-  sources and call-target analysis remain future work.
+  sources remain future work.
+- Call-target analysis for stripped-binary function boundaries: alongside
+  the prologue-pattern scan, each executable section of a stripped x86-64
+  ELF is now disassembled linearly with the same length-aware decoder, and
+  every decoded direct `call rel32` (opcode E8) contributes its target
+  (`instruction address + length + signed displacement`) as a candidate
+  function start - catching functions that lack a frame-setup prologue
+  (cold clones, shrink-wrapped `-Os` entries). A target qualifies when it
+  falls inside the scanned section (cross-section branches into `.plt` are
+  thereby excluded), decodes cleanly for at least 16 bytes, does not open
+  with a PLT-stub shape, and is not already a prologue candidate; the
+  union runs through the unchanged decode-aware overlap merge and
+  call-target-only starts get the same synthesized `func_<hex addr>`
+  names. Direct `jmp rel32` (E9) targets were measured and kept out: they
+  may be tail-thunks, but most are loop back-edges and goto joins that
+  split correct functions (with E9 the sweep drops to precision 0.4334 /
+  recall 0.9215). Measured on the same 40-row O0-Os sweep, the call-target
+  scan moves the stripped-boundary heuristic from pooled precision 0.9806
+  / recall 0.8588 (F1 0.9157) to precision 0.9819 / recall 0.9174
+  (F1 0.9486): 159 more ground-truth starts for 13 more unmatched starts.
+  The stripped half of `scripts/mixed_demo.sh` holds with the finer
+  boundaries (16 heuristic functions vs 11 before, both majorities
+  unchanged).
 - Hardened-build axis and hardening detection: the corpus gains 30 builds
   compiled with `-fstack-protector-all`, `-D_FORTIFY_SOURCE=2`, and
   `-fcf-protection=full` (new `hardening` manifest column), and the
