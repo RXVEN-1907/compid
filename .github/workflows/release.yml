@@ -413,7 +413,7 @@ jobs:
           cat "sha256sums-${GITHUB_REF_NAME}.txt"
 
       - name: Publish the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body_path: .github/release-body.md
           fail_on_unmatched_files: true
