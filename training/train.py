@@ -42,6 +42,7 @@ import numpy as np
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import confusion_matrix
 from sklearn.metrics import f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import normalize
@@ -260,7 +261,9 @@ def fit_field(field: str, classes: list[str], dicts: list[dict], y: list[str], a
             f1_score(y_idx, pred, labels=list(range(len(classes))), average="macro", zero_division=0)
         )
         top3 = topk_accuracy(probs, y_idx, 3)
-        return {"top1": top1, "top3": top3, "macro_f1": macro_f1}
+        confusion = confusion_matrix(y_idx, pred, labels=list(range(len(classes))))
+        return {"top1": top1, "top3": top3, "macro_f1": macro_f1,
+                "confusion": confusion.tolist()}
 
     def holdout_reliability() -> list[dict]:
         """Confidence vs observed accuracy on the hold-out: the empirical
@@ -303,6 +306,7 @@ def fit_field(field: str, classes: list[str], dicts: list[dict], y: list[str], a
         "test": test_metrics,
         "train": train_metrics,
         "reliability": reliability,
+        "confusion": test_metrics["confusion"],
     }
 
 
@@ -457,7 +461,9 @@ def main() -> int:
 
     calib_path = REPO_ROOT / "docs" / "calibration.json"
     per_field = {
-        row["field"]: row["reliability"]
+        row["field"]: {"reliability": row["reliability"],
+                       "confusion": row["test"]["confusion"],
+                       "classes": row["classes"]}
         for row in report_rows if not row["skipped"]
     }
     calib_path.write_text(json.dumps({

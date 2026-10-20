@@ -19,7 +19,7 @@ OS, libc flavor, PIE, LTO, static linking, and hardening** - ten label fields,
 each with a confidence score, each grounded in a build-fingerprint dataset the
 project generates itself.
 
-<div align="center"><img src="docs/demo.gif" alt="an animated terminal running compid classify on a seed binary: six label fields appear one by one with lavender confidence bars" width="640"></div>
+<div align="center"><img src="docs/demo.gif" alt="an animated terminal running compid classify on a seed binary: six label fields appear one by one with lavender confidence bars" width="660"></div>
 
 *The real output for a seed binary (gcc 13.3.0, -O0, no-PIE) - every field
 lands correctly.*
@@ -63,7 +63,7 @@ green winners) and respect the [`NO_COLOR`](https://no-color.org) standard;
 
 ## What it learns
 
-<div align="center"><img src="docs/accuracy.png" alt="horizontal bar chart of held-out top-1 accuracy per label field, nine fields near 100 percent, top-3 ticks at 100 percent" width="780"></div>
+<div align="center"><img src="docs/accuracy.png" alt="horizontal bar chart of held-out top-1 accuracy per label field, nine fields near 100 percent, top-3 ticks at 100 percent" width="800"></div>
 
 Held-out metrics on the 1389-build seed (80/20 stratified split, seed 42):
 
@@ -85,6 +85,71 @@ PE Windows, and Mach-O macOS; `hardening` detects the stack-protector /
 fortify / CET build flavor. Skewed axes are fitted class-weighted, and their
 macro-F1 says so honestly. Full per-class breakdowns:
 [`docs/EVALUATION.md`](docs/EVALUATION.md).
+
+### Where the weak spot lives
+
+`opt_level` is the one field with real misses - so here is the full
+confusion matrix instead of hiding it:
+
+<div align="center"><img src="docs/confusion-opt-level.png" alt="6x6 confusion matrix for opt_level: green diagonal, amber confusions concentrated in the O2/O3/Os neighborhood" width="620"></div>
+
+The misses live almost entirely in the O2/O3 pair, where O3's code shape is
+a strict subset of what O2 emits on this corpus. `O0`, `O1`, and `Oz` are
+never confused with anything.
+
+### Can you trust the confidence score?
+
+Yes - and it is measured. Every retrain buckets its hold-out predictions by
+the winning class's confidence and scores observed accuracy per bucket:
+
+<div align="center"><img src="docs/calibration.png" alt="reliability diagram: observed accuracy per predicted-confidence bucket against the perfect-calibration diagonal" width="700"></div>
+
+Above the default abstention threshold (0.6) every bucket delivers 69-99%
+observed accuracy; the 0.5-0.6 band is measurably overconfident (31%
+observed) - exactly the zone the `[low confidence]` flag catches. The
+threshold is validated by this table, not chosen at random.
+
+## The fingerprint space
+
+Why does a linear model work this well? Because the feature space is
+*visibly* separated. All 1389 seed binaries projected to 2D with
+TruncatedSVD over raw fingerprints - computed fully unsupervised, labels
+used only to color the dots afterward:
+
+<div align="center"><img src="docs/feature-space.png" alt="two scatter panels of 1389 binaries in 2D: gcc and clang occupy different regions, and linux/macos/windows separate cleanly" width="860"></div>
+
+No clustering was run, no labels were shown to the projection. The
+structure is in the fingerprints themselves - amber gcc on one side,
+lavender clang on the other, the three operating systems peeling apart on
+their own. A linear classifier reads boundaries off a space that already
+looks like this.
+
+## Function-level provenance
+
+Real binaries are stitched together from vendored libraries built by
+different toolchains. `compid functions <BIN>` reads the symbol table
+(unstripped ELF), the export table (PE DLLs), or a measured prologue +
+call-target scan (stripped x86-64 ELF) and predicts provenance **per
+function**:
+
+<div align="center"><img src="docs/functions-demo.gif" alt="animated terminal showing compid functions attributing eleven functions of a mixed binary: amber gcc halves, lavender clang halves, split verdict" width="700"></div>
+
+One binary, half linked from gcc and half from zig cc - and every function
+is attributed to its own toolchain. The acceptance runs mechanically as
+`scripts/mixed_demo.sh`.
+
+### What the scanner sees
+
+For stripped binaries the boundary detector proposes starts from a
+prologue-pattern scan unioned with direct call-target analysis. Measured
+against symbol ground truth, not promised:
+
+<div align="center"><img src="docs/boundary-map.png" alt="byte map of a 513KB static binary's .text section with green symbol-truth hairlines and amber scanner hairlines" width="100%"></div>
+
+513,728 bytes, 1,047 symbol functions, one pixel per byte. Green hairlines
+are the ground truth from the unstripped twin; amber hairlines are what the
+scanner finds with no symbols at all: 1,048 starts, 1,004 matched within 8
+bytes - pooled **precision 0.98, recall 0.92, F1 0.95** on the full sweep.
 
 ## The seed dataset
 
@@ -108,37 +173,9 @@ class-weighted for the skewed axes, exported as a human-readable
 `model/model.json` (`compid-model/v1`) that the Rust binary scores with no
 Python, no services, no network.
 
-**Calibration is measured, not claimed.** Every retrain buckets its hold-out
-predictions by the winning class's confidence and scores observed accuracy
-per bucket - the reliability data validates the abstention threshold
-empirically: above the 0.6 default, buckets deliver 69-99% observed
-accuracy, while the flagged 0.5-0.6 band is measurably overconfident (31%
-observed). See [`docs/calibration.png`](docs/calibration.png) and
-[`docs/EVALUATION.md`](docs/EVALUATION.md).
-
-</details>
-
-<details>
-<summary><strong>Function-level provenance</strong></summary>
-
-Real binaries are stitched together from vendored libraries built by
-different toolchains. `compid functions <BIN>` reads the symbol table
-(unstripped ELF), the export table (PE DLLs), or a measured prologue +
-call-target scan (stripped x86-64 ELF) and predicts provenance **per
-function** - so a binary assembled from half gcc and half zig reads as
-exactly that:
-
-```console
-$ scripts/mixed_demo.sh
-gcc half: 4 functions -> gcc=4
-zig half: 6 functions -> clang=6
-MIXED-DEMO SPLIT OK
-```
-
-The stripped-binary boundary detector is measured against symbol ground
-truth rather than promised: pooled precision 0.98 / recall 0.87 / F1 0.95
-on a stratified 40-binary sweep. Per-function models: hold-out
-compiler-family top-1 0.9970 per function, 0.9950 by build majority.
+Extraction throughput, measured on this machine: ~14 binaries/second for
+full disassembly-heavy extraction, ~134 ms for a warm classify of a small
+binary including process start.
 
 </details>
 
@@ -160,6 +197,19 @@ compiler-family top-1 0.9970 per function, 0.9950 by build majority.
 
 </details>
 
+<details>
+<summary><strong>Robustness, tested not hoped for</strong></summary>
+
+The extractor eats untrusted bytes, so a deterministic mutation fuzzer runs
+every parsing path in CI: 3,256 cases over the committed fixtures - bit
+flips, truncations, inflated length fields, corrupted section and
+load-command tables - each under a panic-and-hang guard. Five
+arithmetic-overflow panics found that way are fixed with saturating math
+and pinned as regression tests. One upstream goblin overflow is scoped and
+documented.
+
+</details>
+
 ## How it works
 
 ```mermaid
@@ -177,10 +227,7 @@ flowchart LR
 The inference path is a single Rust binary: it parses the container with
 [goblin](https://docs.rs/goblin), disassembles with
 [yaxpeax-x86](https://docs.rs/yaxpeax-x86), and scores a compact
-`model.json` you can read with a text editor. Robustness is tested, not
-hoped for: a deterministic 3,256-case mutation fuzzer runs every parsing
-path under malformed input in CI, and five overflow panics found that way
-are fixed and regression-pinned.
+`model.json` you can read with a text editor.
 
 ## How compid compares
 
