@@ -105,12 +105,18 @@ Feature keys are `<prefix>:<name>`; every value is an integer count over the
 | `sec:`         | log2 size     | log2 of the section's size in bytes (`sec:text` = 13 is 8 KiB)          |
 | `ent:`         | integer 0-8   | the section's byte entropy in bits per symbol, rounded (`ent:text`)     |
 | `meta:windows` | count         | 64-byte sliding windows of `.text` that disassemble cleanly             |
+| `meta:macos`   | count         | the same count over a Mach-O image's `__TEXT,__text`; the macOS container marker |
 | `cmt:`         | count         | tokens from comment and note string sections (`cmt:clang`)              |
 
 Notes:
 
 - Counts are raw integer tf values. No normalization happens in the JSON;
   L2 normalization is applied identically at train time and at infer time.
+- Section keys spell the name the way the container does: ELF sections are
+  bare names (`sec:text`), PE sections carry their COFF spelling
+  (`sec:.text`), and Mach-O sections pair segment and section name
+  (`sec:__TEXT,__text`), since Mach-O section names are only unique within
+  their segment.
 - `labels` carries the ground truth recorded by the corpus builder. For a
   binary extracted outside the corpus - `compid extract` on a sample of your
   own - every label is an empty string. Training reads labels from the

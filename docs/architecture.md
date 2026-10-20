@@ -39,11 +39,11 @@ the same tooling (see `docs/dataset.md`).
 
 ## Stage 2 - extraction
 
-`compid extract` (Rust) reads the ELF - or the PE - with
+`compid extract` (Rust) reads the ELF - or the PE, or the Mach-O - with
 [goblin](https://docs.rs/goblin) and disassembles `.text` with
 [yaxpeax-x86](https://docs.rs/yaxpeax-x86), emitting one JSON object of
 integer counts per binary. The container is detected from the file's magic
-bytes; the feature families below come out of either format unchanged:
+bytes; the feature families below come out of any of the formats unchanged:
 
 | prefix         | feature                                          | why it separates builds                                                              |
 |----------------|--------------------------------------------------|--------------------------------------------------------------------------------------|
@@ -54,15 +54,26 @@ bytes; the feature families below come out of either format unchanged:
 | `sec:`         | log2 of each section's size                      | section layout follows the linker and the flags                                      |
 | `ent:`         | per-section entropy, integer 0-8                 | plain code, high-entropy data, or compressed content are easy to tell apart          |
 | `meta:windows` | 64-byte sliding windows that disassemble cleanly | aligned, compiler-emitted code disassembles cleanly; packed or mixed content does not |
-| `cmt:`         | tokens from comment and note string sections; on PE, import-table DLL names | `.comment` often names the compiler and version outright; imports name the OS runtimes a Windows binary touches |
+| `cmt:`         | tokens from comment and note string sections; on PE, import-table DLL names; on Mach-O, dylib load-command names | `.comment` often names the compiler and version outright; imports name the OS runtimes a Windows binary touches, dylibs the ones a macOS binary touches |
 
-PE (Windows, x86-64 today) rides the same pipeline: the same feature
+PE (Windows, x86-64) rides the same pipeline: the same feature
 families come out of the PE `.text` section, and the import table's DLL
 names are counted as `cmt:` tokens - the strongest OS/libc signal a Windows
 binary carries. Labels follow the manifest's windows-row conventions
 (`os=windows`, the COFF machine spelling `x86_64`, `pie`/`static` = `n/a`),
 and a non-x86-64 PE, if one ever appears, skips the disassembly features
 rather than counting garbage.
+
+Mach-O (macOS, x86-64 and arm64) rides the same pipeline too: sections are
+named `__SEGMENT,__section` in the `sec:`/`ent:` keys, the dylib
+load-command names become basename `cmt:` tokens, and the clean-window
+count files under `meta:macos` - the macOS container marker, mirroring how
+`meta:windows` doubles as the PE one. Labels are `os=macos`, the cputype
+spelling (`x86_64`, `aarch64`), and `pie=pie` (modern macOS requires
+position-independent main executables) with `abi`/`static` = `n/a` like
+the windows rows. An arm64 Mach-O skips the x86-64 disassembly features
+exactly like a non-x86-64 PE would; its byte n-grams and section features
+still flow.
 
 Counts are integer tf values over the `.text` section. The JSON holds no
 normalized numbers: L2 normalization happens at train time and at infer time,

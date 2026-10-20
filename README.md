@@ -24,7 +24,8 @@ label field, and ship the model with the tool.
 The dataset grows, and the tooling for growing it is part of the repository.
 The pipeline is the product.
 
-The inference path is a single Rust binary. It parses the ELF with
+The inference path is a single Rust binary. It parses ELF, PE, and
+Mach-O images with
 [goblin](https://docs.rs/goblin), disassembles `.text` with
 [yaxpeax-x86](https://docs.rs/yaxpeax-x86), and scores a compact `model.json`
 you can read with a text editor. No Python, no services, no network calls.
@@ -52,7 +53,7 @@ the part a hunch never does.
 ## Quickstart
 
 Rust 1.75 or newer, on Linux or macOS. The classifier runs on any architecture
-Rust compiles for; today it reads ELF and PE (x86-64) files.
+Rust compiles for; today it reads ELF, PE, and Mach-O (x86-64) files.
 
 ```console
 $ cargo install --path .
@@ -63,39 +64,44 @@ Two commands to start with - classify a binary, then ask why:
 ```console
 $ compid classify /tmp/sample
 binary: /tmp/sample
-model:   model/model.json (trained 2026-10-20, 43896 features)
+model:   model/model.json (trained 2026-10-20, 68352 features)
 build-id: d1294f531713bb3802b7f5a57fe5c1e6ab895e3f
 
 compiler_family
-  0. gcc    99.93%  ####################
-  1. clang   0.07%
+  0. gcc    99.90%  ####################
+  1. clang   0.10%
 
 compiler_version
-  0. 13.3.0  99.94%  ####################
-  1. 19.1.7   0.06%
+  0. 13.3.0  99.91%  ####################
+  1. 19.1.7   0.09%
 
 opt_level
-  0. O0    83.88%  #################
-  1. O2     8.02%  ##
-  2. Os     4.72%  #
+  0. O0    87.35%  #################
+  1. O2     6.71%  #
+  2. Os     3.33%  #
+
+os
+  0. linux    98.57%  ####################
+  1. macos     1.18%  
+  2. windows   0.26%  
 
 pie
-  0. no-pie  87.97%  ##################
-  1. pie     12.03%  ##
+  0. no-pie  75.62%  ###############
+  1. pie     23.82%  #####
 ```
 
 That sample is a real binary from the seed dataset (gcc 13.3.0, -O0, no-PIE);
-`arch`, `abi`, `lto`, and `static` all land above 99.7% on the same run, and
+`arch`, `abi`, `lto`, and `static` all land above 96.8% on the same run, and
 the table above is elided to the interesting fields.
 
 ```console
 $ compid explain /tmp/sample
-arch: x86_64 (99.7% confidence)
+arch: x86_64 (99.8% confidence)
   top contributing features:
-    ng:000000      +2.0451  (tf=45)
-    mn:mov         +0.3609  (tf=17)
-    ng:000048      +0.2839  (tf=12)
-    rg:rax         +0.2421  (tf=25)
+    ng:000000      +2.1610  (tf=45)
+    mn:mov         +0.3544  (tf=17)
+    ng:000048      +0.2609  (tf=12)
+    rg:rax         +0.2038  (tf=25)
 ```
 
 See [`examples/demo-transcript.md`](examples/demo-transcript.md) for a fuller
@@ -141,19 +147,20 @@ spots - lives in [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
 | field | classes | rows | top-1 | top-3 |
 |-------|---------|------|-------|-------|
-| compiler_family | 2 | 1155 | 1.0000 | 1.0000 |
-| compiler_version | 2 | 1155 | 1.0000 | 1.0000 |
-| opt_level | 6 | 1155 | 0.8918 | 0.9784 |
-| arch | 4 | 1155 | 1.0000 | 1.0000 |
-| os | 2 | 1155 | 1.0000 | 1.0000 |
-| abi | 2 | 1155 | 0.9567 | 1.0000 |
-| pie | 3 | 1155 | 1.0000 | 1.0000 |
-| lto | 2 | 1155 | 0.9567 | 1.0000 |
-| static | 3 | 1155 | 1.0000 | 1.0000 |
+| compiler_family | 2 | 1359 | 1.0000 | 1.0000 |
+| compiler_version | 2 | 1359 | 1.0000 | 1.0000 |
+| opt_level | 6 | 1359 | 0.8971 | 0.9926 |
+| arch | 4 | 1359 | 1.0000 | 1.0000 |
+| os | 3 | 1359 | 1.0000 | 1.0000 |
+| abi | 3 | 1359 | 0.9816 | 1.0000 |
+| pie | 3 | 1359 | 0.9963 | 1.0000 |
+| lto | 2 | 1359 | 0.9632 | 1.0000 |
+| static | 3 | 1359 | 0.9890 | 1.0000 |
 
-`arch` covers x86-64, aarch64, riscv64, and arm32; `os` separates ELF from
-PE. `lto` sits at its majority baseline until the matrix gains more
-LTO-built rows, and `opt_level`'s confusion is concentrated in O2/O3 pairs.
+`arch` covers x86-64, aarch64, riscv64, and arm32; `os` separates ELF
+Linux, PE Windows, and Mach-O macOS. `lto` sits at its majority baseline
+until the matrix gains more LTO-built rows, and `opt_level`'s confusion is
+concentrated in O2/O3 pairs.
 
 ## Expanding the matrix
 
@@ -183,8 +190,9 @@ on top of.
 
 The near list, from [`docs/roadmap.md`](docs/roadmap.md):
 
-- PE and Mach-O support, so the same classifier covers Windows and macOS
-  artifacts
+- macOS dataset rows - the classifier already reads Mach-O (x86-64 and
+  arm64) artifacts, and retrains on macos rows once the build matrix
+  seeds them
 - more architectures - riscv64 and arm32 alongside x86-64 and aarch64
 - function-level classification, not just whole-binary
 - Ghidra and IDA plugins that load `model.json` directly

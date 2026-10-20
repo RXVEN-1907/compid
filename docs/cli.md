@@ -26,12 +26,16 @@ with `-o`. The JSON follows the schema in `docs/dataset.md`: `build_id` and
 `labels` are empty strings for binaries outside the corpus, and `features`
 holds the integer counts over `.text`.
 
-Both ELF and PE (Windows, x86-64) binaries extract through this one
-command; the container is detected from the file's magic bytes. PE output
-carries `os=windows`, the architecture spelled from the COFF machine
-(`x86_64`), and the manifest's windows-row conventions for the fields a PE
-does not express (`pie`/`static` = `n/a`); the import table's DLL names
-appear as lowercase `cmt:` features.
+ELF, PE (Windows, x86-64), and Mach-O (macOS, x86-64 and arm64) binaries
+extract through this one command; the container is detected from the file's
+magic bytes. PE output carries `os=windows`, the architecture spelled from
+the COFF machine (`x86_64`), and the manifest's windows-row conventions for
+the fields a PE does not express (`pie`/`static` = `n/a`); the import
+table's DLL names appear as lowercase `cmt:` features. Mach-O output
+carries `os=macos`, the architecture spelled from the header cputype
+(`x86_64`, `aarch64`), `pie=pie` (modern macOS executables are PIE by
+construction), and the dylib load-command names as lowercase basename
+`cmt:` features; 32-bit Mach-O images are rejected with a clear error.
 
 ## compid classify
 
@@ -58,10 +62,11 @@ opt_level         O2             0.64
 each a map of class name to probability. Consumers should ignore unknown
 fields; the schemas version themselves (`format`, `feature_version`).
 
-PE binaries classify through the same command. A field the loaded model
-does not know (say, `os` before a retrain on windows rows) is simply
-absent from the output - the extractor reports what it sees, the model
-answers only what it was trained on.
+PE and Mach-O binaries classify through the same command. A field whose
+classes the loaded model does not know (say, a `macos` value before a
+retrain that includes macos rows) simply never comes up: the model answers
+only from the classes it was trained on, and the extractor reports what it
+sees.
 
 ## compid explain
 
