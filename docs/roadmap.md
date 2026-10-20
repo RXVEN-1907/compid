@@ -28,12 +28,16 @@ demand, not research.
 
 ### Function-level classification
 
-Whole-binary provenance first, per-function provenance second. Unstripped
-binaries hand over boundaries via the symbol table; stripped ones need
-function-boundary heuristics (prologue patterns, call targets, alignment
-padding). The output becomes a per-function provenance table, which is what
-makes the tool genuinely useful on large real-world binaries assembled from
-mixed toolchains and vendored libraries.
+Unstripped ELF done as of this round: `compid functions` enumerates
+functions from the ELF symbol table (relocatable objects included), scores
+each function's scoped feature vector with `model/functions.json`
+(`compiler_family` and `opt_level`), and `compid functions-batch --features`
+feeds `training/train_functions.py`, whose hold-out splits by build. The
+mixed-toolchain proof runs mechanically as `scripts/mixed_demo.sh`. Still
+ahead: stripped-binary function-boundary heuristics (prologue patterns,
+call targets, alignment padding) and PE/Mach-O symbol sources, after which
+the output is a complete per-function provenance table for binaries
+assembled from mixed toolchains and vendored libraries.
 
 ### Ghidra and IDA plugins
 

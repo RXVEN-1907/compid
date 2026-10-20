@@ -6,6 +6,17 @@ The format string inside the file versions the layout, and
 `feature_version` versions the feature schema the model was trained against
 (currently `"1"`, as specified in `docs/dataset.md`).
 
+The per-function model `model/functions.json` uses this exact format too -
+same `format`/`feature_version`/`created`/`features`/`fields` layout, same
+reader validation in `src/model.rs`, no version bump. Two things differ,
+both data rather than format: the `features` list draws from the
+function-scoped schema (`ng:`, `mn:`, `rg:`, `cn:`, `fn:<log2size>`,
+`meta:windows` - no `sec:`, `ent:`, or `cmt:`), and `fields` holds only the
+fields a single function witnesses (`compiler_family`, `opt_level`). The
+whole-binary CLI would happily load `functions.json`; the per-function CLI
+defaults to it. `docs/FUNCTIONS-EVALUATION.md` reports its hold-out
+numbers.
+
 ## Example
 
 ```json

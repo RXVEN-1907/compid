@@ -11,20 +11,24 @@ in `corpus/` and is documented in `corpus/README.md`.
 |-----------------------------|---------------------------|-------------------------------------------------------|
 | `dataset/manifest.csv`      | yes                       | one row per built binary, with ground-truth labels    |
 | `dataset/binaries/`         | no (gitignored)           | the binaries themselves; manifest paths point here    |
-| `dataset/features/train.jsonl.gz.*` | yes, after a training run | extracted feature JSON, one object per line, gzipped, split into <100 MB shards |
+| `dataset/features/train.jsonl.gz.*` | yes, after a training run | extracted whole-binary features, one object per line, gzipped, split into <100 MB shards |
 | `dataset/features/train.jsonl` | no (gitignored)        | the uncompressed same thing; a regeneration artifact  |
+| `dataset/features/functions.jsonl.gz.*` | yes, after a functions training run | per-function features from the unstripped ELF rows, one object per function, gzipped, split into <100 MB shards |
+| `dataset/features/functions.jsonl` | no (gitignored)    | the uncompressed same thing; a regeneration artifact  |
 
-Reassemble the features file from the shipped shards with:
+Reassemble both feature files from the shipped shards with:
 
 ```console
 $ cat dataset/features/train.jsonl.gz.* | gunzip > dataset/features/train.jsonl
+$ cat dataset/features/functions.jsonl.gz.* | gunzip > dataset/features/functions.jsonl
 ```
 
-Regenerate it from the binaries any time with:
+Regenerate both from the binaries any time with:
 
 ```console
 $ cargo build --release
 $ ./target/release/compid batch dataset/manifest.csv --out dataset/features/train.jsonl
+$ ./target/release/compid functions-batch dataset/manifest.csv --out dataset/features/functions.jsonl
 ```
 
 ## Manifest schema

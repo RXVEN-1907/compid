@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Function-level provenance for unstripped ELF binaries: `compid functions
+  <BIN>` enumerates functions from the ELF symbol table (SHT_SYMTAB,
+  STT_FUNC with a size, deduplicated by address and size, raw names;
+  relocatable `.o` files included), scores each function's scoped feature
+  vector (`ng:`/`mn:`/`rg:`/`cn:` over the function bytes plus a `fn:`
+  size bucket and `meta:windows`; no `sec:`/`ent:`/`cmt:`) and prints a
+  per-function table with `compiler_family` and `opt_level` predictions
+  and a predicted-family tally from `model/functions.json`. `--features
+  FILE` writes the per-function training JSONL, and `--json` emits the
+  machine-readable form. `compid functions-batch <MANIFEST> --features`
+  runs the same extraction over a manifest with the manifest's ground-truth
+  labels. Stripped ELFs, PEs, and Mach-Os report an explicit reason instead
+  of guessing boundaries; stripped-binary heuristics and PE/Mach-O symbol
+  sources remain future work. `training/train_functions.py` trains the
+  per-function model with the hold-out split by build (all functions of a
+  binary stay on one side), exports the same `compid-model/v1` format,
+  and regenerates `docs/FUNCTIONS-EVALUATION.md`. `scripts/mixed_demo.sh`
+  is the mechanical acceptance test: a gcc-compiled and a zig-cc-compiled
+  corpus source linked into one binary, with each half's functions
+  majority-predicting their own toolchain.
 - Mach-O (macOS) support in extraction: `compid extract`, `classify`,
   `explain`, and `compare` detect the Mach-O container from its magic
   bytes and read 64-bit images (x86-64 and arm64; 32-bit is rejected with

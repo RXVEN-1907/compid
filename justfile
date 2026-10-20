@@ -23,6 +23,12 @@ corpus:
 train:
     .venv/bin/python training/train.py
 
+functions-model features_in="dataset/features/functions.jsonl":
+    .venv/bin/python training/train_functions.py --features-in "{{features_in}}"
+
+mixed-demo: build
+    ./scripts/mixed_demo.sh
+
 smoke: build
     ./target/release/compid dataset-info
     ./target/release/compid classify "$(find dataset/binaries -type f | head -n 1)"

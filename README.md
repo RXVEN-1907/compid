@@ -131,6 +131,50 @@ Four stages, all local:
 
 The longer version, with a pipeline diagram: [`docs/architecture.md`](docs/architecture.md).
 
+## Function-level provenance
+
+A whole-binary fingerprint gives one answer per binary; large real-world
+binaries are often built from several answers at once - a gcc main next to
+a clang-built vendored library. `compid functions <BIN>` reads function
+boundaries from the ELF symbol table (unstripped ELF, including relocatable
+`.o` files), scores each function with a per-function model, and prints one
+line per function. `scripts/mixed_demo.sh` is the proof, run end to end:
+one corpus source compiled with gcc `-O2`, another with `zig cc -O2`,
+linked into a single binary - and the model separates the halves using only
+each function's own bytes:
+
+```text
+$ scripts/mixed_demo.sh
+=== compid functions mixed-demo --model model/functions.json ===
+binary: /tmp/tmp.MOPU9ZNszO/mixed-demo
+model:   model/functions.json (trained 2026-10-20, 20669 features)
+
+name                      addr  size  compiler_family        opt_level
+main                    0x1070   184  gcc          1.00   O2           0.88
+_start                  0x1130    38  gcc          1.00   O2           0.55
+bst_insert.constprop.0  0x1220   106  gcc          0.94   O2           0.71
+walk                    0x1290   343  gcc          0.55   O2           0.72
+height                  0x13f0  2075  gcc          0.59   O2           0.75
+zig_half_main           0x1c10   218  clang        1.00   O0           0.93
+op_inc                  0x1cf0     9  clang        1.00   O0           1.00
+op_sq                   0x1d00    30  clang        1.00   O0           1.00
+...
+11 functions; predicted families: clang=6, gcc=5
+
+gcc half: 4 functions -> gcc=4 (majority gcc)
+zig half: 6 functions -> clang=6 (majority clang)
+MIXED-DEMO SPLIT OK: gcc half -> gcc, zig half -> clang
+```
+
+The script asserts the split, so the acceptance is mechanical: exit 0 only
+when each half's majority matches its toolchain. Function-level training
+data comes from `compid functions-batch --features` into
+`training/train_functions.py`, whose hold-out split is by build (all
+functions of one binary stay on the same side) - the honest numbers and the
+limitations live in [`docs/FUNCTIONS-EVALUATION.md`](docs/FUNCTIONS-EVALUATION.md).
+This round covers unstripped ELF only; stripped-binary heuristics and
+PE/Mach-O symbol sources are next.
+
 ## The seed dataset
 
 Honesty first: the seed matrix is exactly what this machine could build on the
@@ -194,7 +238,8 @@ The near list, from [`docs/roadmap.md`](docs/roadmap.md):
   arm64) artifacts, and retrains on macos rows once the build matrix
   seeds them
 - more architectures - riscv64 and arm32 alongside x86-64 and aarch64
-- function-level classification, not just whole-binary
+- function-level classification - unstripped ELF done (see above);
+  stripped-binary heuristics and PE/Mach-O symbol sources remain
 - Ghidra and IDA plugins that load `model.json` directly
 - online model updates without a full retrain
 

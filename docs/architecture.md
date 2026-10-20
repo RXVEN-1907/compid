@@ -131,6 +131,51 @@ with the exact `model.json` schema, is `docs/model-format.md`.
 how similar are these two binaries' fingerprints - with the cosine similarity
 of their L2-normalized feature vectors.
 
+## Function-level provenance
+
+Whole-binary features answer "how was this binary built"; large real-world
+binaries are often built from several answers at once - a gcc main, a
+clang-built vendored library, a musl static libc. `compid functions`
+re-runs the feature core at function granularity so each answer can be
+found separately:
+
+- **Boundaries.** Function ranges come from the ELF symbol table this
+  round: SHT_SYMTAB entries of type STT_FUNC with a nonzero size,
+  deduplicated by `(st_value, st_size)`, resolved to file offsets through
+  their containing executable section. Relocatable objects (`.o`) are
+  first-class - in `ET_REL` the symbol value is a section offset, in a
+  linked binary it is a virtual address. Names stay raw; nothing is
+  demangled. A stripped ELF, a PE, or a Mach-O yields an empty function
+  list with an explicit reason - boundaries are never guessed. Stripped
+  binary heuristics (prologue patterns, call targets, alignment padding)
+  and PE/Mach-O symbol sources are the next rounds.
+- **Features.** Each function gets the same byte- and code-shape
+  namespaces scoped to exactly its own bytes: `ng:`, `mn:`, `rg:`, `cn:`,
+  plus a one-hot size bucket `fn:<floor(log2(bytes))>` clamped to 0..=24
+  and the container marker `meta:windows` (clean 64-byte windows within
+  the function). No `sec:`, `ent:`, or `cmt:` keys - those describe the
+  container, and letting them in would let a model read the container
+  instead of the code, which is the one failure mode function-level
+  classification must not have in a mixed-toolchain binary.
+- **Training.** `training/train_functions.py` consumes the per-function
+  JSONL (`compid functions-batch --features`) and trains
+  `compiler_family` and `opt_level` - the two fields a function actually
+  witnesses - with the same multinomial LR recipe, exported as
+  `model/functions.json` in the same `compid-model/v1` format. One
+  critical difference: the hold-out split is **by build**, not by
+  function, because neighboring functions of one binary are near-duplicates
+  and a per-function split would leak a build into its own hold-out.
+  The honest numbers and the split rationale live in
+  `docs/FUNCTIONS-EVALUATION.md`.
+- **Inference.** `compid functions <BIN> --model model/functions.json`
+  prints the per-function table with per-function confidence, and pools
+  nothing: the footer tally is a plain count of predicted families.
+  Aggregation - majority vote per function group - is left to the caller;
+  `scripts/mixed_demo.sh` is the worked example: two corpus sources built
+  with gcc and zig cc, linked into one binary, with the mechanical
+  assertion that each half's functions majority-predict their own
+  toolchain.
+
 ## On-disk layout
 
 | path                   | committed               | contents                                   |
@@ -138,7 +183,8 @@ of their L2-normalized feature vectors.
 | `dataset/manifest.csv` | yes                     | one row per built binary                   |
 | `dataset/binaries/`    | no (gitignored)         | the binaries themselves                    |
 | `dataset/features/`    | yes, after a training run | extracted feature JSON, one object per line (`train.jsonl`) |
-| `model/model.json`     | yes                     | the trained model (`compid-model/v1`)      |
+| `model/model.json`     | yes                     | the trained whole-binary model (`compid-model/v1`) |
+| `model/functions.json` | yes, after a function-level training run | the trained per-function model (same format, two fields) |
 
 ## Design choices worth defending
 

@@ -6,9 +6,13 @@ target/
 dataset/binaries/
 dataset/features/train.jsonl
 
+# Per-function training corpus (regeneration artifact, same as train.jsonl)
+dataset/features/functions.jsonl
+
 # Python virtual environments and caches
 .venv/
 __pycache__/
 
 # Sharded feature archives (reassemble: cat train.jsonl.gz.* | gunzip > train.jsonl)
 dataset/features/train.jsonl.gz
+dataset/features/functions.jsonl.gz
