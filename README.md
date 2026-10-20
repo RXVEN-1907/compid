@@ -4,6 +4,8 @@
   <p><strong>Shazam for compiled binaries - which compiler built this binary?</strong></p>
   <p>
     <a href="https://github.com/RXVEN-1907/compid/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/RXVEN-1907/compid/actions/workflows/ci.yml/badge.svg"></a>
+    <a href="https://github.com/RXVEN-1907/compid/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/RXVEN-1907/compid?include_prereleases&sort=semver"></a>
+    <a href="https://github.com/RXVEN-1907/compid/releases/latest"><img alt="platforms" src="https://img.shields.io/badge/platforms-linux%20%7C%20windows%20%7C%20macos%20%7C%20freebsd%20%7C%20netbsd-8a63d2"></a>
     <a href="LICENSE"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg"></a>
     <a href="https://www.rust-lang.org"><img alt="Rust 1.75+" src="https://img.shields.io/badge/rust-1.75%2B-dea584.svg"></a>
     <a href="https://github.com/RXVEN-1907/compid/commits"><img alt="maintenance: actively developed" src="https://img.shields.io/badge/maintenance-actively%20developed-8a63d2.svg"></a>
@@ -48,7 +50,17 @@ the part a hunch never does.
 
 ## Quickstart
 
-Rust 1.75 or newer, on Linux or macOS.
+Prebuilt binaries for Linux, Windows, macOS, FreeBSD, and NetBSD (x86-64,
+arm64, arm32, riscv64, and more) are on the
+[releases page](https://github.com/RXVEN-1907/compid/releases/latest) -
+every archive is self-contained: the trained models ship *inside* the
+binary, so unpack and classify from anywhere.
+
+```console
+$ compid classify suspicious.exe       # works immediately, no model files
+```
+
+Build from source instead (Rust 1.75+, Linux or macOS):
 
 ```console
 $ cargo install --path .
@@ -61,24 +73,46 @@ Tables render in color automatically in terminals (lavender confidence bars,
 green winners) and respect the [`NO_COLOR`](https://no-color.org) standard;
 `--color never` forces plain output for scripts and pipes.
 
+## Install
+
+Tag pushes build and publish every artifact below automatically, each a
+self-contained directory (binary with embedded models, shell completions,
+man page, docs) with a combined `sha256sums` file on the release:
+
+| platform | artifact |
+|---|---|
+| Linux x86-64 (glibc / musl static / 32-bit) | `x86_64-unknown-linux-{gnu,musl}` · `i686-unknown-linux-gnu` |
+| Linux aarch64 | `aarch64-unknown-linux-{gnu,musl}` |
+| Linux arm (32-bit) | `armv7-unknown-linux-gnueabihf` · `arm-unknown-linux-gnueabihf` |
+| Linux riscv64 / loongarch64 / powerpc64le / s390x | same triple pattern |
+| Windows x86-64 | `x86_64-pc-windows-msvc.zip` (MSVC) · `x86_64-pc-windows-gnu.zip` |
+| Windows arm64 / 32-bit | `aarch64-pc-windows-gnullvm.zip` · `i686-pc-windows-gnu.zip` |
+| macOS aarch64 / x86-64 / universal | `aarch64-apple-darwin` · `x86_64-apple-darwin` · `universal2-apple-darwin` |
+| FreeBSD / NetBSD x86-64 | `x86_64-unknown-{freebsd,netbsd}.tar.gz` |
+
+The x86-64 musl build is static and runs anywhere; the Windows MSVC build
+is smoked for real on a Windows runner (run + classify) on every release;
+macOS ships a `universal2` fat binary that runs on Apple silicon and Intel
+from one file.
+
 ## What it learns
 
 <div align="center"><img src="docs/accuracy.png" alt="horizontal bar chart of held-out top-1 accuracy per label field, nine fields near 100 percent, top-3 ticks at 100 percent" width="800"></div>
 
-Held-out metrics on the 1389-build seed (80/20 stratified split, seed 42):
+Held-out metrics on the 1395-build seed (80/20 stratified split, seed 42):
 
 | field | classes | top-1 | top-3 |
 |-------|---------|-------|-------|
 | compiler_family | 2 | 1.0000 | 1.0000 |
 | compiler_version | 2 | 1.0000 | 1.0000 |
-| arch | 4 | 1.0000 | 1.0000 |
-| os | 3 | 0.9964 | 1.0000 |
-| pie | 3 | 0.9928 | 1.0000 |
-| static | 3 | 0.9424 | 1.0000 |
-| abi | 3 | 0.9568 | 1.0000 |
-| lto | 2 | 0.8273 | 1.0000 |
-| hardening | 2 | 0.9281 | 1.0000 |
-| opt_level | 6 | 0.8561 | 0.9964 |
+| os | 3 | 1.0000 | 1.0000 |
+| arch | 4 | 0.9964 | 1.0000 |
+| pie | 3 | 0.9964 | 1.0000 |
+| abi | 3 | 0.9570 | 1.0000 |
+| static | 3 | 0.9498 | 1.0000 |
+| hardening | 2 | 0.9283 | 1.0000 |
+| lto | 2 | 0.8602 | 1.0000 |
+| opt_level | 6 | 0.8674 | 0.9892 |
 
 `arch` covers x86-64, aarch64, riscv64, and arm32; `os` separates ELF Linux,
 PE Windows, and Mach-O macOS; `hardening` detects the stack-protector /
@@ -104,19 +138,19 @@ the winning class's confidence and scores observed accuracy per bucket:
 
 <div align="center"><img src="docs/calibration.png" alt="reliability diagram: observed accuracy per predicted-confidence bucket against the perfect-calibration diagonal" width="700"></div>
 
-Above the default abstention threshold (0.6) every bucket delivers 69-99%
-observed accuracy; the 0.5-0.6 band is measurably overconfident (31%
+Above the default abstention threshold (0.6) every bucket delivers 70-99%
+observed accuracy; the 0.5-0.6 band is measurably overconfident (43%
 observed) - exactly the zone the `[low confidence]` flag catches. The
 threshold is validated by this table, not chosen at random.
 
 ## The fingerprint space
 
 Why does a linear model work this well? Because the feature space is
-*visibly* separated. All 1389 seed binaries projected to 2D with
+*visibly* separated. All 1395 seed binaries projected to 2D with
 TruncatedSVD over raw fingerprints - computed fully unsupervised, labels
 used only to color the dots afterward:
 
-<div align="center"><img src="docs/feature-space.png" alt="two scatter panels of 1389 binaries in 2D: gcc and clang occupy different regions, and linux/macos/windows separate cleanly" width="860"></div>
+<div align="center"><img src="docs/feature-space.png" alt="two scatter panels of 1395 binaries in 2D: gcc and clang occupy different regions, and linux/macos/windows separate cleanly" width="860"></div>
 
 No clustering was run, no labels were shown to the projection. The
 structure is in the fingerprints themselves - amber gcc on one side,
@@ -129,8 +163,9 @@ looks like this.
 Real binaries are stitched together from vendored libraries built by
 different toolchains. `compid functions <BIN>` reads the symbol table
 (unstripped ELF), the export table (PE DLLs), or a measured prologue +
-call-target scan (stripped x86-64 ELF) and predicts provenance **per
-function**:
+call-target scan (stripped x86-64, on any of the three container formats
+- ELF executable sections, PE raw sections, Mach-O `__TEXT`) and predicts
+provenance **per function**:
 
 <div align="center"><img src="docs/functions-demo.gif" alt="animated terminal showing compid functions attributing eleven functions of a mixed binary: amber gcc halves, lavender clang halves, split verdict" width="700"></div>
 
@@ -153,7 +188,7 @@ bytes - pooled **precision 0.98, recall 0.92, F1 0.95** on the full sweep.
 
 ## The seed dataset
 
-<div align="center"><img src="docs/dataset.png" alt="donut chart of 1389 builds by OS - linux 1087, macos 204, windows 98 - plus a bar chart of builds per architecture" width="700"></div>
+<div align="center"><img src="docs/dataset.png" alt="donut chart of 1395 builds by OS - linux 1091, macos 204, windows 100 - plus a bar chart of builds per architecture" width="700"></div>
 
 Every binary is compiled from one of 57 self-contained seed programs across a
 resumable, deterministic build matrix - nine cross targets through zig's `cc`
@@ -201,7 +236,7 @@ binary including process start.
 <summary><strong>Robustness, tested not hoped for</strong></summary>
 
 The extractor eats untrusted bytes, so a deterministic mutation fuzzer runs
-every parsing path in CI: 3,256 cases over the committed fixtures - bit
+every parsing path in CI: 3,344 cases over the committed fixtures - bit
 flips, truncations, inflated length fields, corrupted section and
 load-command tables - each under a panic-and-hang guard. Five
 arithmetic-overflow panics found that way are fixed with saturating math
@@ -214,7 +249,7 @@ documented.
 
 ```mermaid
 flowchart LR
-    A["corpus sources<br/>57 C/C++ programs"] --> B["build matrix<br/>1389 builds - 9 targets"]
+    A["corpus sources<br/>57 C/C++ programs"] --> B["build matrix<br/>1395 builds - 9 targets"]
     B --> C["extract<br/>ng / mn / rg / cn / sec / ent / cmt"]
     C --> D["train<br/>10 per-field models"]
     D --> E["model/model.json"]
@@ -245,9 +280,13 @@ build, extract, train, classify - something you can re-run end to end.
 ## Releases
 
 Tag a version (`git tag v0.2.0 && git push --tags`) and the release
-workflow builds x86-64 and aarch64 tarballs with the binary, shell
-completions for bash/zsh/fish/PowerShell, the man page, and docs -
-byte-reproducibly, with sha256 checksums.
+workflow builds the full matrix from the
+[Install](#install) table - Linux (glibc, musl, 32-bit, arm, riscv64,
+loongarch64, powerpc64le, s390x), Windows (MSVC + GNU, x86-64 and arm64),
+macOS (both architectures plus a universal2 fat binary), and
+FreeBSD/NetBSD - each with shell completions for
+bash/zsh/fish/PowerShell, the man page, and docs, staged
+byte-reproducibly and published with a combined sha256 checksums file.
 
 ## Contributing
 
@@ -255,8 +294,9 @@ The dataset grows the same way the code does: add a toolchain or target to
 the matrix, rebuild, re-extract, retrain, and commit the refreshed manifest,
 features, and model together. See
 [CONTRIBUTING.md](CONTRIBUTING.md) and the
-[roadmap](docs/roadmap.md) - function-level provenance for PE/Mach-O,
-warm-started model blending, and calibration curves are the open fronts.
+[roadmap](docs/roadmap.md) - warm-started model blending, measured
+PE/Mach-O boundary ground truth, and coverage-guided fuzzing are the open
+fronts.
 
 ## License
 

@@ -26,14 +26,14 @@ GREEN = (74, 222, 128)
 DATA = [
     ("compiler_family", 2, 1.0000, 1.0000),
     ("compiler_version", 2, 1.0000, 1.0000),
-    ("arch", 4, 1.0000, 1.0000),
-    ("os", 3, 0.9964, 1.0000),
-    ("pie", 3, 0.9928, 1.0000),
-    ("static", 3, 0.9890, 1.0000),
-    ("abi", 3, 0.9568, 1.0000),
-    ("lto", 2, 0.8273, 1.0000),
-    ("hardening", 2, 0.9281, 1.0000),
-    ("opt_level", 6, 0.8561, 0.9964),
+    ("arch", 4, 0.9964, 1.0000),
+    ("os", 3, 1.0000, 1.0000),
+    ("pie", 3, 0.9964, 1.0000),
+    ("static", 3, 0.9498, 1.0000),
+    ("abi", 3, 0.9570, 1.0000),
+    ("lto", 2, 0.8602, 1.0000),
+    ("hardening", 2, 0.9283, 1.0000),
+    ("opt_level", 6, 0.8674, 0.9892),
 ]
 
 MONO = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
@@ -58,7 +58,7 @@ def main():
                         outline=PANEL_EDGE, width=2)
 
     d.text((40, 34), "held-out accuracy per field", font=FS(30), fill=TEXT)
-    d.text((40, 76), "top-1 (bar) and top-3 (tick) - 1389-build seed, stratified split, seed 42",
+    d.text((40, 76), "top-1 (bar) and top-3 (tick) - 1395-build seed, stratified split, seed 42",
            font=F(16), fill=DIM)
 
     # gridlines at 0/25/50/75/100 %

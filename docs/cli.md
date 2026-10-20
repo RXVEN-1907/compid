@@ -11,9 +11,13 @@ compid [--version] [--help] <subcommand> [args]
 
 Defaults that matter:
 
-- `--model` defaults to `model/model.json` relative to the repository root;
-  pass it explicitly when classifying from elsewhere. The per-function
-  `functions` subcommand defaults to `model/functions.json` instead.
+- `--model` resolution: an explicit path must exist; otherwise
+  `model/model.json` relative to the current directory, else the model
+  **embedded in the binary at build time** - released `compid` binaries are
+  self-contained and classify from anywhere with no files beside them
+  (`compid model-info` shows `<embedded>` when the embed is in use). The
+  per-function `functions` subcommand resolves `model/functions.json` the
+  same way, and `--no-model` lists functions without predictions.
 - `--manifest` on `dataset-info` defaults to `dataset/manifest.csv`.
 
 ## Output color
@@ -158,17 +162,20 @@ present.
 ## compid functions
 
 ```text
-compid functions <BIN> [--model PATH] [--features FILE] [--json] [--measure] [--color auto|always|never]
+compid functions <BIN> [--model PATH] [--no-model] [--features FILE] [--json] [--measure] [--color auto|always|never]
 ```
 
 Per-function provenance for one binary. All three container formats have a
-symbol source now: an unstripped ELF (a relocatable `.o` works too) lists
+symbol source: an unstripped ELF (a relocatable `.o` works too) lists
 its SHT_SYMTAB function symbols, a PE with an export directory lists its
-named exports (a plain Windows executable without an export table reports
-that instead - boundaries are never guessed there), and a Mach-O with an
+named exports, and a Mach-O with an
 `LC_SYMTAB` lists its defined symbols in executable `__TEXT` sections
 (names keep the ABI's leading underscore, and nlist sizes are derived from
-the next symbol's value or the section end). The table lists each
+the next symbol's value or the section end). When a PE has no export
+table, or a Mach-O has no symbol table, the x86-64 fallback is the same
+measured prologue + call-target scan the stripped ELF path uses (running
+over the PE's executable sections or the Mach-O's `__TEXT` code sections;
+non-x86-64 keeps its explicit reason rather than guessing boundaries). The table lists each
 function's raw (never demangled) symbol name, its address as the symbol
 source records it, its size, and - when a function-level model is loaded -
 the predicted `compiler_family` and `opt_level` with per-function
@@ -198,9 +205,11 @@ binary)` - so synthesized names are never mistaken for symbol names. The `--json
 source explicitly (`"source": "heuristic"` versus `"symbol_table"`). What
 still prints an explicit reason instead of a table (and exits 0): a
 stripped non-x86-64 ELF, a PE without an export table, and a Mach-O
-without a symbol table. `--model` defaults to
-`model/functions.json` when that file exists; an explicitly passed `--model`
-that does not exist is an error. A model file carries only the two
+without a symbol table. `--model` resolves `model/functions.json` when
+that file exists, else the embedded per-function model; an explicitly
+passed `--model`
+that does not exist is an error, and `--no-model` forces a plain listing
+with no predictions. A model file carries only the two
 per-function fields, so the table never predicts container-level labels -
 see `docs/FUNCTIONS-EVALUATION.md` for the per-function hold-out numbers.
 

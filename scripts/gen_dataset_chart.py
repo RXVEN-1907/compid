@@ -25,8 +25,8 @@ AMBER = (217, 180, 80)
 GRAY = (122, 136, 148)
 
 # keep in sync with dataset/manifest.csv
-BY_OS = [("linux (ELF)", 1087, LAVENDER), ("macos (Mach-O)", 204, TEAL), ("windows (PE)", 98, AMBER)]
-BY_ARCH = [("x86_64", 883), ("riscv64", 204), ("aarch64", 200), ("arm", 102)]
+BY_OS = [("linux (ELF)", 1091, LAVENDER), ("macos (Mach-O)", 204, TEAL), ("windows (PE)", 100, AMBER)]
+BY_ARCH = [("x86_64", 889), ("riscv64", 204), ("aarch64", 200), ("arm", 102)]
 TOTAL = sum(v for _, v, _ in BY_OS)
 
 MONO = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"

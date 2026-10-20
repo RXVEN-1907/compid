@@ -5,9 +5,47 @@ All notable changes to compid are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-10-20
 
 ### Added
+
+- The stripped-binary boundary scanner leaves ELF: a plain PE without an
+  export table and a stripped Mach-O without a symbol table now go through
+  the same prologue + call-target scan as a stripped x86-64 ELF (PE
+  executable raw-data sections with RVA reporting; Mach-O `__TEXT,__text`
+  and `__TEXT,__stub_helper` with symbol-table address conventions;
+  non-x86-64 keeps its explicit reason). Synthetic stripped PE32+/Mach-O
+  images pin the address conventions in `tests/stripped_pe_macho_test.rs`;
+  no published precision/recall for those two formats (no ground truth
+  ships), while the ELF scan stays measured.
+- Self-contained release binaries: the trained models ship embedded in the
+  executable (`model/model.json.gz` and `model/functions.json.gz`,
+  timestamp-free gzip so rebuilds stay byte-reproducible; the trainers
+  rewrite them on every run). A released `compid` classifies from any
+  directory with no files beside it - `compid model-info` reports
+  `<embedded>` - while an explicit `--model` still wins, and `functions
+  --no-model` lists functions without predictions.
+- A 19-artifact release pipeline (`.github/workflows/release.yml` +
+  `scripts/package_release.py`): Linux (x86-64 glibc/musl/i686, aarch64
+  glibc/musl, armv7, armv6, riscv64, loongarch64, powerpc64le, s390x),
+  Windows (x86-64 MSVC smoked for real on a Windows runner, plus x86-64/i686
+  GNU and aarch64 via zig), macOS (aarch64, x86_64, and a universal2 fat
+  binary, natively linked), and FreeBSD/NetBSD x86-64 via cross-rs. Every
+  archive is staged deterministically (epoch mtimes, root owner, sorted
+  entries, timestamp-free gzip), the x86-64 musl build is exercised live in
+  CI, and a combined `sha256sums` file lands on the release.
+- The corpus-to-model loop is closed at 1,395 rows: the export-demo DLL
+  slice folded into the whole-binary feature corpus and the model
+  retrained - `os` back to 1.0000, `opt_level` up to 0.8674, `lto` to
+  0.8602, `static` to 0.9498; all charts, the calibration table, and
+  `docs/EVALUATION.md` refreshed from the same run.
+- `compid ... | head` no longer panics: SIGPIPE is restored to the default
+  disposition on unix.
+- Windows consoles get real colors: the terminal layer enables VT
+  processing via `SetConsoleMode` when stdout is a console (Windows
+  Terminal already has it; classic conhost now renders the tables too).
+- CI grew macOS and Windows legs (full `cargo test` on both), and the
+  release matrix's Windows arm64 target is exercised by a gnullvm build.
 
 - PE and Mach-O function sources, closing the function-level roadmap item:
   `compid functions` now covers all three container formats. A PE
@@ -175,6 +213,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script console.
 - riscv64 and arm32 matrix axes - the corpus builder, manifest, and model
   now cover riscv64 and arm32 alongside x86-64 and aarch64.
+
+### Changed
+
+- `--model` no longer carries a `default_value`: resolution is explicit
+  path → `./model/model.json` → embedded model, so a missing default can
+  fall back instead of failing.
 
 ### Security
 

@@ -35,22 +35,29 @@ its `LC_SYMTAB` (defined non-stab symbols in executable `__TEXT` sections,
 raw names with the ABI's leading underscore, next-symbol-derived sizes).
 The per-function dataset now spans all three formats (267,626 ELF, 74,873
 Mach-O, and 8 PE function rows), and the hold-out numbers moved up with
-the added coverage. What remains open is heuristic rather than symbolic:
-boundaries for a plain PE without an export table and for a stripped
-Mach-O (prologue-style scans over `.text` / `__text`), and per-function
-`static`-side details the export table cannot see (non-exported DLL
-functions, Mach-O sizes that only DWARF would pin down).
+the added coverage. The heuristic side extended too: a plain PE without an
+export table and a stripped Mach-O now go through the same prologue +
+call-target scan as a stripped x86-64 ELF (over the PE's executable
+sections / the Mach-O's `__TEXT,__text` and `__TEXT,__stub_helper`), with
+synthetic-image tests pinning the address conventions. Honest caveat: no
+precision/recall is published for PE/Mach-O heuristics - no stripped
+ground truth ships for those formats - while the ELF scan stays measured.
+What remains open is per-function `static`-side detail the export table
+cannot see (non-exported DLL functions, Mach-O sizes that only DWARF
+would pin down).
 
 ### Ghidra and IDA plugins
 
 The Ghidra side starts this round: `ghidra_scripts/compid_classify.py`
 classifies the program under analysis and appends the per-field predictions
-to a listing plate comment. Still ahead is deeper Ghidra integration -
-per-function predictions and the explain view surfaced in the disassembler
-UI - and the IDA equivalent. `model.json` is a static file with a
-documented format, so plugins can load it directly - no server, no
-reimplementation of training, just inference against the model the repo
-ships (or a local retrained one).
+to a listing plate comment. The IDA equivalent exists too now, as an
+experimental IDAPython plugin (`contrib/ida/compid_ida.py`): classify the
+input file into a plate comment, optionally annotate address-matched
+functions. Both load `model.json` directly - a static file with a
+documented format, no server, no reimplementation of training. Still ahead
+is deeper integration on either side: per-function predictions and the
+explain view surfaced in the disassembler UI, and real-world testing of
+the IDA plugin.
 
 ### Online model updates
 
@@ -133,7 +140,9 @@ headers state how many builds stand behind a model.
   in-tree mutation fuzzer (see Done) covers every committed fixture on
   every `cargo test`; continuous coverage with a coverage-guided fuzzer
   (cargo-fuzz on a corpus that grows beyond the fixtures) remains open.
-- Prebuilt release binaries for common platforms.
+- Prebuilt release binaries: done - a 19-artifact matrix (Linux glibc/musl
+  across five ISAs, Windows MSVC/GNU, macOS universal2, FreeBSD/NetBSD)
+  publishes on every `v*` tag; see `.github/workflows/release.yml`.
 
 ## Non-goals
 

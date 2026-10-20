@@ -13,7 +13,9 @@ are compiled across every toolchain and flag combination that machine
 supports. The matrix started at 849 rows; the same-day expansions added
 riscv64/arm32, then macOS targets, and finally a hardened-build axis
 (`-fstack-protector-all`, `-D_FORTIFY_SOURCE=2`, `-fcf-protection=full` on
-a slice of gcc builds), taking the manifest to **1389 rows**. All 1389
+a slice of gcc builds), taking the manifest to **1389 rows**. A focused
+slice then added an export-building Windows DLL source so PE functions
+exist to learn from, taking the manifest to **1395 rows**. All 1395
 binaries are in the feature corpus - the extractor handles ELF, PE, and
 Mach-O.
 
@@ -22,20 +24,20 @@ Mach-O.
 | `gcc13`   | the system gcc, 13.3.0 | `x86_64-linux-gnu` |
 | `zig-cc`  | zig's `cc` driver bundling clang 19.1.7 | `x86_64-linux-gnu`, `x86_64-linux-musl` (static), `aarch64-linux-gnu`, `riscv64-linux-gnu`, `riscv64-linux-musl`, `arm-linux-musleabihf`, `x86_64-windows-gnu`, `x86_64-macos`, `aarch64-macos` |
 
-Label distributions over the 1389-row feature corpus:
+Label distributions over the 1395-row feature corpus:
 
 | label | values (count) |
 |-------|----------------|
-| `compiler_family` | clang (967), gcc (422) |
-| `compiler_version` | 19.1.7 (967), 13.3.0 (422) |
-| `opt_level` | O2 (578), O0 (558), O1 (65), O3 (65), Os (74), Oz (49) |
-| `arch` | x86_64 (883), riscv64 (204), aarch64 (200), arm (102) |
-| `os` | linux (1087), macos (204), windows (98) |
-| `abi` | gnu (883), musl (302), n/a (204) |
-| `pie` | no-pie (740), pie (551), n/a (98) |
-| `lto` | off (1341), on (48) |
-| `static` | no (761), yes (326), n/a (302) |
-| `hardening` | none (1359), hardened (30) |
+| `compiler_family` | clang (971), gcc (424) |
+| `compiler_version` | 19.1.7 (971), 13.3.0 (424) |
+| `opt_level` | O2 (581), O0 (561), O1 (65), O3 (65), Os (74), Oz (49) |
+| `arch` | x86_64 (889), riscv64 (204), aarch64 (200), arm (102) |
+| `os` | linux (1091), macos (204), windows (100) |
+| `abi` | gnu (889), musl (302), n/a (204) |
+| `pie` | no-pie (742), pie (553), n/a (100) |
+| `lto` | off (1347), on (48) |
+| `static` | no (765), yes (326), n/a (304) |
+| `hardening` | none (1365), hardened (30) |
 
 Several axes are entangled in this seed: every aarch64, riscv64, arm, and
 macOS build is also non-PIE or PIE respectively and zig-built (only gcc
@@ -50,13 +52,13 @@ noise in the labels.
 One multinomial logistic regression per label field
 (`LogisticRegression(max_iter=3000, C=4.0)`), fitted on L2-normalized integer
 count vectors. The raw corpus in `dataset/features/train.jsonl` holds
-1,773,105 distinct features across 1389 binaries; the trainer keeps features
-seen in at least 150 binaries (`--min-df 150`), which leaves a 68,364-feature
-vocabulary and a 24.2 MB `model/model.json` covering all ten label fields.
+1,776,144 distinct features across 1395 binaries; the trainer keeps features
+seen in at least 150 binaries (`--min-df 150`), which leaves a 68,987-feature
+vocabulary and a 24.4 MB `model/model.json` covering all ten label fields.
 Fits are class-weighted (`class_weight="balanced"`, `--no-balanced` to
-disable) so skewed axes - 30 hardened rows against 1359 unhardened - are not
+disable) so skewed axes - 30 hardened rows against 1365 unhardened - are not
 swallowed by the majority prior. Each field is a stratified 80/20 split with
-seed 42; the hold-out is 278 binaries.
+seed 42; the hold-out is 279 binaries.
 
 ## Results (hold-out, seed 42)
 
@@ -64,20 +66,20 @@ seed 42; the hold-out is 278 binaries.
 |-------|---------|-------|-------|----------|
 | `compiler_family` | 2 | 1.0000 | 1.0000 | 1.0000 |
 | `compiler_version` | 2 | 1.0000 | 1.0000 | 1.0000 |
-| `opt_level` | 6 | 0.8561 | 0.9964 | 0.7991 |
-| `arch` | 4 | 1.0000 | 1.0000 | 1.0000 |
-| `os` | 3 | 0.9964 | 1.0000 | 0.9952 |
-| `abi` | 3 | 0.9568 | 1.0000 | 0.9580 |
-| `pie` | 3 | 0.9928 | 1.0000 | 0.9881 |
-| `lto` | 2 | 0.8273 | 1.0000 | 0.5874 |
-| `static` | 3 | 0.9424 | 1.0000 | 0.9424 |
-| `hardening` | 2 | 0.9281 | 1.0000 | 0.6239 |
+| `opt_level` | 6 | 0.8674 | 0.9892 | 0.8206 |
+| `arch` | 4 | 0.9964 | 1.0000 | 0.9962 |
+| `os` | 3 | 1.0000 | 1.0000 | 1.0000 |
+| `abi` | 3 | 0.9570 | 1.0000 | 0.9581 |
+| `pie` | 3 | 0.9964 | 1.0000 | 0.9974 |
+| `lto` | 2 | 0.8602 | 1.0000 | 0.6190 |
+| `static` | 3 | 0.9498 | 1.0000 | 0.9496 |
+| `hardening` | 2 | 0.9283 | 1.0000 | 0.6240 |
 
 Reading the weak spots honestly:
 
-- `opt_level` at 86% top-1 is dominated by O2/O3 confusion (O3 is the
+- `opt_level` at 87% top-1 is dominated by O2/O3 confusion (O3 is the
   smallest gcc-compiled class and its code shape is a strict subset of what
-  O2 emits on this corpus). Top-3 covers 99.6%.
+  O2 emits on this corpus). Top-3 covers 98.9%.
 - `lto` and `hardening` are the two severely skewed axes (48 and 30 rows
   against their majorities). The class-weighted fit recovers both above
   their baselines - hardening detection lands at 93% top-1 against a 97.8%
@@ -98,23 +100,23 @@ truth (`training/train.py` writes `docs/calibration.json` on every run;
 
 | confidence bucket | n | observed accuracy |
 |-------------------|-----|-------------------|
-| 0.0-0.5 | 22 | 0.4091 |
-| 0.5-0.6 | 70 | 0.3143 |
-| 0.6-0.7 | 59 | 0.6949 |
-| 0.7-0.8 | 108 | 0.8611 |
-| 0.8-0.9 | 225 | 0.9067 |
-| 0.9-1.0 | 2296 | 0.9895 |
+| 0.0-0.5 | 23 | 0.2609 |
+| 0.5-0.6 | 58 | 0.4310 |
+| 0.6-0.7 | 63 | 0.6984 |
+| 0.7-0.8 | 107 | 0.8972 |
+| 0.8-0.9 | 242 | 0.8926 |
+| 0.9-1.0 | 2297 | 0.9922 |
 
 Reading it honestly:
 
 - Above the default abstention threshold (0.6) the model is well behaved -
-  every bucket delivers at or above the diagonal, and the 2296 predictions
-  at 0.9+ confidence are 98.95% correct.
-- The 0.5-0.6 band is **overconfident**: predicted 50-60%, observed 31%.
+  every bucket delivers at or above the diagonal, and the 2297 predictions
+  at 0.9+ confidence are 99.22% correct.
+- The 0.5-0.6 band is **overconfident**: predicted 50-60%, observed 43%.
   That band is exactly what the `[low confidence]` flag exists to catch -
   the abstention threshold is validated by this table, not chosen at
   random.
-- The 0.0-0.5 bucket's small n (22) spans several fields' genuinely
+- The 0.0-0.5 bucket's small n (23) spans several fields' genuinely
   ambiguous hold-out rows; treat it as anecdote, not statistics.
 
 ## Reproducing
