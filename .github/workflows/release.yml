@@ -119,6 +119,7 @@ jobs:
     name: Build (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: prep
     strategy:
       fail-fast: false
       matrix:
@@ -153,7 +154,6 @@ jobs:
           zigdir="$(python3 -c 'import ziglang, pathlib; print(pathlib.Path(ziglang.__file__).parent)')"
           sudo ln -sf "$zigdir/zig" /usr/local/bin/zig
           zig version
-          cargo zigbuild --version
 
       - name: Build
         run: cargo zigbuild --release --target ${{ matrix.target }}
@@ -234,6 +234,7 @@ jobs:
     name: Build (macOS aarch64 + x86_64 + universal2)
     runs-on: macos-latest
     timeout-minutes: 45
+    needs: prep
     steps:
       - uses: actions/checkout@v4
 
@@ -297,6 +298,7 @@ jobs:
     name: Build (x86_64-windows-msvc)
     runs-on: windows-latest
     timeout-minutes: 45
+    needs: prep
     steps:
       - uses: actions/checkout@v4
 
@@ -348,6 +350,7 @@ jobs:
     name: Build (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    needs: prep
     strategy:
       fail-fast: false
       matrix:

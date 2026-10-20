@@ -92,11 +92,12 @@ def sorted_members(root: Path) -> list[Path]:
 
 def write_tar_gz(root: Path, name: str, out_dir: Path) -> Path:
     """Fixed tar (GNU format, epoch mtimes, root owner) through a
-    timestamp-free gzip stream."""
+    timestamp-free gzip stream. Members carry the <name>/ prefix so an
+    unpack lands in one directory, matching dist.sh's historical layout."""
     buf = BytesIO()
     with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as tar:
         for p in sorted_members(root):
-            ti = tar.gettarinfo(str(p), arcname=str(p.relative_to(root)))
+            ti = tar.gettarinfo(str(p), arcname=f"{name}/{p.relative_to(root).as_posix()}")
             ti.uid = ti.gid = 0
             ti.uname = ti.gname = ""
             ti.mtime = 0
