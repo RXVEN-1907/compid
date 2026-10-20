@@ -600,8 +600,17 @@ fn cmd_functions_batch(manifest_path: &Path, out: Option<&Path>, features: bool)
             writeln!(writer, "== {} (build_id {})", row.path, row.build_id)
                 .context("write failed")?;
             for f in &ex.functions {
-                writeln!(writer, "{:<40}  0x{:x}  {}", f.name, f.addr, f.size)
-                    .context("write failed")?;
+                // Symbol names are untrusted bytes from the binary under
+                // analysis: escape control characters before the listing
+                // sink, same as the functions table.
+                writeln!(
+                    writer,
+                    "{:<40}  0x{:x}  {}",
+                    report::display_name(&f.name),
+                    f.addr,
+                    f.size
+                )
+                .context("write failed")?;
             }
             writeln!(writer).context("write failed")?;
         }

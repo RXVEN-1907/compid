@@ -135,16 +135,28 @@ pub struct FunctionRow {
     pub opt_level: Option<(String, f64)>,
 }
 
-/// Display form of a raw symbol name: capped to 48 characters (counted in
+/// Escaped, truncated display form of a raw symbol name - shared by the
+/// functions table and the functions-batch listing. Symbol names come from
+/// the binary under analysis; control bytes (newlines, ANSI escapes, other
+/// C0) are escaped as \xNN and the result is capped to 48 chars (counted in
 /// chars, not bytes, so multi-byte names stay valid UTF-8) with an ASCII
-/// ellipsis. The JSON output keeps the full name.
-fn display_name(name: &str) -> String {
+/// ellipsis. The JSON outputs keep the full, unsanitized name (serde handles
+/// its own escaping).
+pub fn display_name(name: &str) -> String {
     const NAME_CAP: usize = 48;
-    if name.chars().count() > NAME_CAP {
-        let keep: String = name.chars().take(NAME_CAP - 3).collect();
+    let mut escaped = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_control() {
+            escaped.push_str(&format!("\\x{:02x}", u32::from(c)));
+        } else {
+            escaped.push(c);
+        }
+    }
+    if escaped.chars().count() > NAME_CAP {
+        let keep: String = escaped.chars().take(NAME_CAP - 3).collect();
         format!("{keep}...")
     } else {
-        name.to_string()
+        escaped
     }
 }
 
@@ -182,7 +194,15 @@ pub fn function_provenance(
     // C++ template names); the table truncates for display, the JSON output
     // never does.
     let display: Vec<String> = rows.iter().map(|r| display_name(&r.name)).collect();
-    let name_w = display.iter().map(|s| s.len()).max().unwrap_or(0).max(4);
+    // Width counts chars to match display_name's char-based truncation
+    // (escaped control bytes are ASCII, so byte and char counts agree for
+    // them, but multi-byte names would otherwise misalign the table).
+    let name_w = display
+        .iter()
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(4);
     let addr_w = rows.iter().map(|r| r.addr.len()).max().unwrap_or(0).max(3);
     let size_w = rows
         .iter()
@@ -336,5 +356,25 @@ mod tests {
             &[],
         );
         assert!(text.contains("no functions: no symbol table: binary looks stripped"));
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::display_name;
+
+    #[test]
+    fn control_bytes_are_escaped_for_terminal_sinks() {
+        assert_eq!(display_name("ok_name"), "ok_name");
+        assert_eq!(display_name("ev\x1b[31mil"), "ev\\x1b[31mil");
+        assert_eq!(display_name("in\njection\r"), "in\\x0ajection\\x0d");
+    }
+
+    #[test]
+    fn truncation_still_applies_after_escaping() {
+        let long = format!("{}{}", "a", "\t".repeat(60));
+        let out = display_name(&long);
+        assert!(out.chars().count() <= 48);
+        assert!(out.contains("\\x09"));
     }
 }

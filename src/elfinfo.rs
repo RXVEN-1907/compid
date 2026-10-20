@@ -276,12 +276,21 @@ fn enumerate_functions(elf: &goblin::elf::Elf, is_rel: bool) -> (Vec<FunctionSym
             continue;
         }
         let file_offset = if is_rel {
-            // st_value is the offset within the section.
+            // st_value is the offset within the section; the declared range
+            // must stay inside it.
+            if sym.st_value.saturating_add(sym.st_size) > hdr.sh_size {
+                continue; // crafted symbol: range runs past the section
+            }
             hdr.sh_offset as usize + sym.st_value as usize
         } else {
             let lo = hdr.sh_addr;
             let hi = lo.saturating_add(hdr.sh_size);
             if sym.st_value >= lo && sym.st_value < hi {
+                // The declared byte range must stay inside the section too,
+                // or a crafted symbol could have us read past it.
+                if sym.st_value.saturating_add(sym.st_size) > hi {
+                    continue;
+                }
                 hdr.sh_offset as usize + (sym.st_value - lo) as usize
             } else {
                 continue;
