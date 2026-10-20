@@ -299,7 +299,7 @@ fn enumerate_functions(
             if sym.st_value.saturating_add(sym.st_size) > hdr.sh_size {
                 continue; // crafted symbol: range runs past the section
             }
-            hdr.sh_offset as usize + sym.st_value as usize
+            file_offset_usize(hdr.sh_offset.saturating_add(sym.st_value))
         } else {
             let lo = hdr.sh_addr;
             let hi = lo.saturating_add(hdr.sh_size);
@@ -309,7 +309,11 @@ fn enumerate_functions(
                 if sym.st_value.saturating_add(sym.st_size) > hi {
                     continue;
                 }
-                hdr.sh_offset as usize + (sym.st_value - lo) as usize
+                // sh_offset comes straight from the (untrusted) section
+                // header and can be anything, so the addition saturates
+                // instead of panicking on overflow; the result feeds
+                // `file_slice`, which clamps to the file extent anyway.
+                file_offset_usize(hdr.sh_offset.saturating_add(sym.st_value - lo))
             } else {
                 continue;
             }
@@ -345,6 +349,14 @@ fn section_name_exists(elf: &goblin::elf::Elf, want: &str) -> bool {
     elf.section_headers
         .iter()
         .any(|hdr| elf.shdr_strtab.get_at(hdr.sh_name) == Some(want))
+}
+
+/// A `u64` file offset from an untrusted header, as a `usize`. Saturates at
+/// `usize::MAX` on 32-bit hosts (no truncation wrapping); the consumers
+/// (`file_slice`, `section_data`) clamp to the file extent, so a saturated
+/// offset reads as empty rather than wrapping into a bogus small range.
+fn file_offset_usize(v: u64) -> usize {
+    usize::try_from(v).unwrap_or(usize::MAX)
 }
 
 /// Human-friendly architecture name from `e_machine`.

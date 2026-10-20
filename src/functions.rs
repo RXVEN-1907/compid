@@ -378,7 +378,13 @@ pub fn scan_prologue_candidates(bytes: &[u8], base_addr: u64) -> Vec<(u64, u64)>
             if !bytes[i..].starts_with(pattern.bytes) {
                 continue;
             }
-            let aligned = (base_addr + i as u64).is_multiple_of(FUNCTION_ALIGNMENT);
+            // base_addr comes straight from the (untrusted) section header,
+            // so the addition saturates instead of panicking on overflow; on
+            // real binaries sh_addr + len never approaches u64::MAX, so the
+            // alignment gate behaves exactly as before.
+            let aligned = base_addr
+                .saturating_add(i as u64)
+                .is_multiple_of(FUNCTION_ALIGNMENT);
             let after = &bytes[i + plen..];
             if pattern.endbr64 {
                 if is_plt_stub_after_endbr64(after) {
@@ -456,12 +462,14 @@ pub fn heuristic_functions(info: &ElfInfo) -> Vec<FunctionSymbol> {
             continue;
         }
         for (start, size) in scan_prologue_candidates(&bytes, section.addr) {
-            let addr = section.addr + start;
+            // Both additions saturate: `addr` is an untrusted sh_addr plus a
+            // scan offset, and a crafted header can carry u64::MAX values.
+            let addr = section.addr.saturating_add(start);
             out.push(FunctionSymbol {
                 name: format!("func_{addr:x}"),
                 addr,
                 size,
-                file_offset: section.offset + start as usize,
+                file_offset: section.offset.saturating_add(start as usize),
             });
         }
     }

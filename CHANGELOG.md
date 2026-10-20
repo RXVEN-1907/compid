@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Parsing-path robustness: a deterministic, in-tree mutation fuzzer
+  (`tests/robustness_test.rs`, no external crates, no nightly) that runs
+  on every `cargo test` and corrupts each committed fixture in
+  `tests/fixtures/` 88 ways - 3,256 cases over 37 fixtures spanning bit
+  flips, byte and magic-byte substitution, truncation, duplicated and
+  appended section-header tables, inflated length fields
+  (`sh_size`/`sh_offset`/section sizes at their type maximum), ELF
+  `e_shnum`/`e_shoff`/`e_phnum`/`e_type` header corruption, and
+  endianness flips - then pushes every mutant through the full
+  user-facing surface (`extract`, `functions` with the stripped-binary
+  prologue heuristic, and the classify path) under `catch_unwind` with a
+  30-second per-case hang guard. The sweep hardens offset arithmetic on
+  untrusted headers to saturating math (the first run found overflow
+  panics in the ELF symbol-to-file-offset computation in
+  `src/elfinfo.rs` and the prologue scan's alignment/address arithmetic
+  in `src/functions.rs`; one further panic lives inside goblin 0.10.7's
+  Mach-O `LC_MAIN` handling and is scoped to its exact case in a
+  documented allowlist), asserts the `functions`-empty == `reason`-set
+  and `meta:`-key invariants on every mutant, and pins the fixed sites
+  with named regression cases. Mutations are reproducible: a pinned seed,
+  per-case seeds derived from the fixture file name, a single-case
+  reproducer (`COMPID_FUZZ_FIXTURE`/`COMPID_FUZZ_CASE`), and corpus
+  extension by dropping any ELF/PE/Mach-O into `tests/fixtures/`.
+  Coverage-guided (cargo-fuzz) continuous fuzzing remains future work.
 - Stripped-binary function boundaries for x86-64 ELF: `compid functions`
   no longer gives up on a stripped binary - a conservative prologue scan
   over the executable sections (frame-pointer prologues and the crt-stub

@@ -23,3 +23,14 @@ yaxpeax-x86 = "2.2.0"
 [profile.release]
 lto = true
 strip = true
+
+# The robustness suite (tests/robustness_test.rs) runs thousands of mutated
+# fixtures through the disassembler, which is too slow at opt-level 0 to hold
+# the suite's wall-clock budget. A little optimization fixes that, while
+# debug assertions and integer-overflow checks stay ON on purpose: an
+# overflow panic on a crafted header is exactly what the suite exists to
+# catch.
+[profile.test]
+opt-level = 1
+debug-assertions = true
+overflow-checks = true

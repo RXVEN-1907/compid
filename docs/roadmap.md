@@ -50,6 +50,31 @@ feeding it new builds weekly.
 
 ## Done
 
+### Parsing-path robustness (deterministic mutation fuzzing)
+
+The extractor's parsing path is fuzzed on every `cargo test` now, in-tree
+and dependency-free: `tests/robustness_test.rs` is a seeded xorshift64
+mutation fuzzer that corrupts every committed fixture in `tests/fixtures/`
+88 ways each (3,256 deterministic cases across bit flips, byte and
+magic-byte substitution, truncation, duplicated/appended section-header
+tables, inflated length fields, header-field corruption, and endianness
+flips) and pushes every mutant through the full user-facing surface -
+`extract_binary`, `extract_binary_functions` (stripped-binary prologue
+heuristic included), and the classify path - under `catch_unwind` with a
+per-case timeout. The assertions: no panic anywhere (the one panic that
+lives inside goblin 0.10.7's Mach-O `LC_MAIN` arithmetic is scoped to its
+exact case and documented in the allowlist), no hang, and the documented
+invariants hold. The first run found four overflow sites in compid's own
+code - the symbol-to-file-offset additions in `src/elfinfo.rs` and the
+prologue-alignment and synthesized-address additions in `src/functions.rs`
+- all fixed with saturating arithmetic that cannot change results on valid
+binaries (`scripts/mixed_demo.sh` and the `--measure` sweep confirm the
+boundary numbers), and pinned by regression cases in the suite. The same
+seed always produces the same mutations, single cases are reproducible via
+environment variables, and extending the corpus is a file drop into
+`tests/fixtures/`. Continuous coverage-guided fuzzing (cargo-fuzz) remains
+open.
+
 ### Hardened-build axis and hardening detection
 
 The matrix gained 30 hardened builds (`-fstack-protector-all`,
@@ -90,8 +115,10 @@ headers state how many builds stand behind a model.
   the JSON output.
 - Hardened-build flag axes in the matrix (`-fstack-protector-all`, CFI,
   shadow stacks) for realism on modern binaries.
-- Continuous fuzzing of the extractor's parsing path, since it eats
-  untrusted bytes.
+- Continuous fuzzing of the extractor's parsing path: the deterministic
+  in-tree mutation fuzzer (see Done) covers every committed fixture on
+  every `cargo test`; continuous coverage with a coverage-guided fuzzer
+  (cargo-fuzz on a corpus that grows beyond the fixtures) remains open.
 - Prebuilt release binaries for common platforms.
 
 ## Non-goals

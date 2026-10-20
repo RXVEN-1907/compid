@@ -79,6 +79,23 @@ Counts are integer tf values over the `.text` section. The JSON holds no
 normalized numbers: L2 normalization happens at train time and at infer time,
 where it is used. The exact schema is specified in `docs/dataset.md`.
 
+Because the parsers eat untrusted bytes - every offset, size, count, and
+address they read comes straight out of the file - the pipeline carries a
+robustness guarantee on top of the feature contract: feeding it malformed
+input yields either a clean result or a clean error, never a panic, a
+hang, or a wrapped offset. The guarantee is enforced by
+`tests/robustness_test.rs`, a deterministic seeded mutation fuzzer that
+runs on every `cargo test`: it corrupts each committed fixture in
+`tests/fixtures/` thousands of ways (bit flips, magic and header-field
+corruption, truncation, duplicated and inflated section headers) and
+pushes every mutant through the full user-facing surface - `extract`,
+`functions` (heuristic included), and classify - under a panic catcher
+with a per-case timeout. The same property is what its fixes pin down:
+offset arithmetic on untrusted headers saturates instead of overflowing,
+loops are bounded by remaining bytes, and panics found during the first
+fuzzing runs (symbol-to-file-offset and prologue-alignment arithmetic) were
+converted into saturating math with regression cases left in the suite.
+
 ## Stage 3 - labels
 
 One label field per question, all recorded at build time:
