@@ -89,6 +89,34 @@ Reading the weak spots honestly:
   container signals rather than libc internals.
 - `pie`'s single hold-out miss is the same PE boundary.
 
+## Calibration - can you trust the confidence score?
+
+A softmax probability is a promise. To check it, every hold-out prediction
+is bucketed by the winning class's confidence and scored against ground
+truth (`training/train.py` writes `docs/calibration.json` on every run;
+`scripts/gen_calibration_chart.py` renders `docs/calibration.png`):
+
+| confidence bucket | n | observed accuracy |
+|-------------------|-----|-------------------|
+| 0.0-0.5 | 22 | 0.4091 |
+| 0.5-0.6 | 70 | 0.3143 |
+| 0.6-0.7 | 59 | 0.6949 |
+| 0.7-0.8 | 108 | 0.8611 |
+| 0.8-0.9 | 225 | 0.9067 |
+| 0.9-1.0 | 2296 | 0.9895 |
+
+Reading it honestly:
+
+- Above the default abstention threshold (0.6) the model is well behaved -
+  every bucket delivers at or above the diagonal, and the 2296 predictions
+  at 0.9+ confidence are 98.95% correct.
+- The 0.5-0.6 band is **overconfident**: predicted 50-60%, observed 31%.
+  That band is exactly what the `[low confidence]` flag exists to catch -
+  the abstention threshold is validated by this table, not chosen at
+  random.
+- The 0.0-0.5 bucket's small n (22) spans several fields' genuinely
+  ambiguous hold-out rows; treat it as anecdote, not statistics.
+
 ## Reproducing
 
 ```console

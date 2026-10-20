@@ -262,8 +262,34 @@ def fit_field(field: str, classes: list[str], dicts: list[dict], y: list[str], a
         top3 = topk_accuracy(probs, y_idx, 3)
         return {"top1": top1, "top3": top3, "macro_f1": macro_f1}
 
+    def holdout_reliability() -> list[dict]:
+        """Confidence vs observed accuracy on the hold-out: the empirical
+        answer to 'can I trust the number the model prints?'. Buckets by the
+        winning class's softmax probability; per bucket: count and accuracy.
+        Computed with the same rounded weights the Rust reader ships."""
+        x = x_all[idx_test]
+        scores = np.asarray(x.dot(coef.T)) + intercept
+        probs = softmax(scores)
+        y_idx = y_idx_all[idx_test]
+        pred = probs.argmax(axis=1)
+        conf = probs.max(axis=1)
+        correct = pred == y_idx
+        edges = [0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0001]
+        rows = []
+        for lo, hi in zip(edges, edges[1:]):
+            mask = (conf >= lo) & (conf < hi)
+            n = int(mask.sum())
+            acc = float(np.mean(correct[mask])) if n else None
+            rows.append({
+                "bin_lo": lo, "bin_hi": min(hi, 1.0),
+                "n": n,
+                "accuracy": round6(acc) if acc is not None else None,
+            })
+        return rows
+
     test_metrics = evaluate(idx_test)
     train_metrics = evaluate(idx_train)
+    reliability = holdout_reliability()
 
     return {
         "field": field,
@@ -276,6 +302,7 @@ def fit_field(field: str, classes: list[str], dicts: list[dict], y: list[str], a
         "n_test": len(idx_test),
         "test": test_metrics,
         "train": train_metrics,
+        "reliability": reliability,
     }
 
 
@@ -401,6 +428,45 @@ def main() -> int:
             t = row["test"]
             log(f"{row['field']:<18} {len(row['classes']):>7} {row['n']:>6} {t['top1']:>7.4f} "
                 f"{t['top3']:>7.4f} {t['macro_f1']:>9.4f}")
+
+    # Pooled calibration: bucket every field's hold-out predictions by the
+    # winning class's softmax probability and measure observed accuracy per
+    # bucket. This is the evidence behind the abstention threshold - at the
+    # default 0.6 cutoff, the table below says what accuracy the unflagged
+    # fields actually deliver. Rendered by scripts/gen_calibration_chart.py.
+    pooled: dict[tuple[float, float], dict] = {}
+    for row in report_rows:
+        if row["skipped"]:
+            continue
+        for b in row["reliability"]:
+            key = (b["bin_lo"], b["bin_hi"])
+            slot = pooled.setdefault(key, {"n": 0, "correct": 0})
+            slot["n"] += b["n"]
+            if b["accuracy"] is not None:
+                slot["correct"] += round(b["accuracy"] * b["n"])
+    calib_rows = []
+    log("\ncalibration (pooled hold-out, confidence of the winning class):")
+    log(f"{'bin':>16} {'n':>7} {'accuracy':>9}")
+    for (lo, hi) in sorted(pooled):
+        slot = pooled[(lo, hi)]
+        acc = slot["correct"] / slot["n"] if slot["n"] else None
+        acc_s = f"{acc:.4f}" if acc is not None else "-"
+        log(f"{lo:>5.1f}-{hi:<10.1f} {slot['n']:>7} {acc_s:>9}")
+        calib_rows.append({"bin_lo": lo, "bin_hi": hi, "n": slot["n"],
+                           "accuracy": round(acc, 6) if acc is not None else None})
+
+    calib_path = REPO_ROOT / "docs" / "calibration.json"
+    per_field = {
+        row["field"]: row["reliability"]
+        for row in report_rows if not row["skipped"]
+    }
+    calib_path.write_text(json.dumps({
+        "seed": args.random_state,
+        "rows": len(records),
+        "pooled": calib_rows,
+        "per_field": per_field,
+    }, indent=2), encoding="utf-8")
+    log(f"wrote {calib_path.relative_to(REPO_ROOT)} (render: scripts/gen_calibration_chart.py)")
     return 0
 
 

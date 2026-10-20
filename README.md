@@ -108,6 +108,14 @@ class-weighted for the skewed axes, exported as a human-readable
 `model/model.json` (`compid-model/v1`) that the Rust binary scores with no
 Python, no services, no network.
 
+**Calibration is measured, not claimed.** Every retrain buckets its hold-out
+predictions by the winning class's confidence and scores observed accuracy
+per bucket - the reliability data validates the abstention threshold
+empirically: above the 0.6 default, buckets deliver 69-99% observed
+accuracy, while the flagged 0.5-0.6 band is measurably overconfident (31%
+observed). See [`docs/calibration.png`](docs/calibration.png) and
+[`docs/EVALUATION.md`](docs/EVALUATION.md).
+
 </details>
 
 <details>
