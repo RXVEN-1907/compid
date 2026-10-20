@@ -1,11 +1,12 @@
 <div align="center">
-  <img src="docs/compid.svg" alt="compid: a fingerprint of small squares flowing into a compiler-pipeline arrow" width="300">
+  <img src=".github/social-preview.png" alt="compid: a fingerprint of lavender squares flowing into a pipeline arrow, next to the wordmark" width="100%">
   <h1>compid</h1>
   <p><strong>Shazam for compiled binaries - which compiler built this binary?</strong></p>
   <p>
     <a href="https://github.com/RXVEN-1907/compid/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/RXVEN-1907/compid/actions/workflows/ci.yml/badge.svg"></a>
     <a href="LICENSE"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg"></a>
     <a href="https://www.rust-lang.org"><img alt="Rust 1.75+" src="https://img.shields.io/badge/rust-1.75%2B-dea584.svg"></a>
+    <a href="https://github.com/RXVEN-1907/compid/commits"><img alt="maintenance: actively developed" src="https://img.shields.io/badge/maintenance-actively%20developed-8a63d2.svg"></a>
   </p>
 </div>
 
@@ -13,22 +14,15 @@
 
 You hand `compid` a binary - possibly stripped, possibly renamed, possibly
 deliberately anonymous - and it hands back an estimate of how that binary was
-built: compiler family, compiler version, optimization level, architecture,
-OS, libc flavor, and whether the result is position-independent,
-link-time-optimized, or statically linked. Every estimate carries a confidence
-score, and every score is grounded in a build-fingerprint dataset the project
-generates itself: build a corpus of small programs across a matrix of
-toolchains and flags, fingerprint every binary, train one linear model per
-label field, and ship the model with the tool.
+built: **compiler family, compiler version, optimization level, architecture,
+OS, libc flavor, PIE, LTO, static linking, and hardening** - ten label fields,
+each with a confidence score, each grounded in a build-fingerprint dataset the
+project generates itself.
 
-The dataset grows, and the tooling for growing it is part of the repository.
-The pipeline is the product.
+<div align="center"><img src="docs/demo.gif" alt="an animated terminal running compid classify on a seed binary: six label fields appear one by one with lavender confidence bars" width="640"></div>
 
-The inference path is a single Rust binary. It parses ELF, PE, and
-Mach-O images with
-[goblin](https://docs.rs/goblin), disassembles `.text` with
-[yaxpeax-x86](https://docs.rs/yaxpeax-x86), and scores a compact `model.json`
-you can read with a text editor. No Python, no services, no network calls.
+*The real output for a seed binary (gcc 13.3.0, -O0, no-PIE) - every field
+lands correctly.*
 
 ## Why it exists
 
@@ -43,192 +37,142 @@ you can read with a text editor. No Python, no services, no network calls.
 - **Reproducible-build forensics.** Given two artifacts claimed to come from
   the same source tree, provenance estimates are a cheap first check that the
   toolchains involved line up.
+- **Mixed-binary audits.** Modern binaries are stitched together from
+  vendored libraries built by different toolchains - `compid` reads them
+  function by function.
 
 Today that question is answered by hand: eyeballing prologues, string scraps,
-and section layouts, or reaching for signature packs that live inside one
-specific disassembler. `compid` turns the habit into a measured, reproducible
+and section layouts. `compid` turns the habit into a measured, reproducible
 guess that costs one command - and it tells you how confident it is, which is
 the part a hunch never does.
 
 ## Quickstart
 
-Rust 1.75 or newer, on Linux or macOS. The classifier runs on any architecture
-Rust compiles for; today it reads ELF, PE, and Mach-O (x86-64) files.
+Rust 1.75 or newer, on Linux or macOS.
 
 ```console
 $ cargo install --path .
+$ compid classify /bin/ls
+$ compid report /bin/ls          # one rich screen: classify + why + provenance
+$ compid model-info              # what the shipped model knows and how fresh it is
 ```
 
-Two commands to start with - classify a binary, then ask why:
+Tables render in color automatically in terminals (lavender confidence bars,
+green winners) and respect the [`NO_COLOR`](https://no-color.org) standard;
+`--color never` forces plain output for scripts and pipes.
 
-```console
-$ compid classify /tmp/sample
-binary: /tmp/sample
-model:   model/model.json (trained 2026-10-20, 68352 features)
-build-id: d1294f531713bb3802b7f5a57fe5c1e6ab895e3f
+## What it learns
 
-compiler_family
-  0. gcc    99.90%  ####################
-  1. clang   0.10%
+<div align="center"><img src="docs/accuracy.png" alt="horizontal bar chart of held-out top-1 accuracy per label field, nine fields near 100 percent, top-3 ticks at 100 percent" width="780"></div>
 
-compiler_version
-  0. 13.3.0  99.91%  ####################
-  1. 19.1.7   0.09%
+Held-out metrics on the 1389-build seed (80/20 stratified split, seed 42):
 
-opt_level
-  0. O0    87.35%  #################
-  1. O2     6.71%  #
-  2. Os     3.33%  #
+| field | classes | top-1 | top-3 |
+|-------|---------|-------|-------|
+| compiler_family | 2 | 1.0000 | 1.0000 |
+| compiler_version | 2 | 1.0000 | 1.0000 |
+| arch | 4 | 1.0000 | 1.0000 |
+| os | 3 | 0.9964 | 1.0000 |
+| pie | 3 | 0.9928 | 1.0000 |
+| static | 3 | 0.9424 | 1.0000 |
+| abi | 3 | 0.9568 | 1.0000 |
+| lto | 2 | 0.8273 | 1.0000 |
+| hardening | 2 | 0.9281 | 1.0000 |
+| opt_level | 6 | 0.8561 | 0.9964 |
 
-os
-  0. linux    98.57%  ####################
-  1. macos     1.18%  
-  2. windows   0.26%  
-
-pie
-  0. no-pie  75.62%  ###############
-  1. pie     23.82%  #####
-```
-
-That sample is a real binary from the seed dataset (gcc 13.3.0, -O0, no-PIE);
-`arch`, `abi`, `lto`, and `static` all land above 96.8% on the same run, and
-the table above is elided to the interesting fields.
-
-```console
-$ compid explain /tmp/sample
-arch: x86_64 (99.8% confidence)
-  top contributing features:
-    ng:000000      +2.1610  (tf=45)
-    mn:mov         +0.3544  (tf=17)
-    ng:000048      +0.2609  (tf=12)
-    rg:rax         +0.2038  (tf=25)
-```
-
-In a terminal these tables render in color automatically - lavender bars, green winners, dim metadata - and the rendering respects the `NO_COLOR` standard, so piping or redirecting keeps the output plain.
-
-See [`examples/demo-transcript.md`](examples/demo-transcript.md) for a fuller
-real session and [`docs/cli.md`](docs/cli.md) for every subcommand and
-flag - `compid --help` always describes the exact CLI you have installed.
-
-`classify` needs a model; the repository ships `model/model.json` trained on
-the current seed matrix, and `--model` points it at any other model file.
-
-## How it works
-
-Four stages, all local:
-
-1. **Build matrix.** The corpus builder compiles small seed programs with
-   every toolchain and flag combination the build machine supports -
-   optimization levels, PIE on/off, LTO on/off, static/dynamic linking,
-   gnu/musl libc.
-2. **Extraction.** `compid extract` turns each binary into one JSON object of
-   integer counts over `.text`: byte n-grams, mnemonics, registers,
-   immediates, section sizes, per-section entropy, clean-disassembly windows,
-   and tokens from comment and note string sections.
-3. **Training.** The Python trainer L2-normalizes those count vectors and
-   fits one multinomial logistic-regression model per label field.
-4. **Inference.** `compid classify` normalizes the same way, computes
-   `intercept + dot(coef, x)` per class, applies a softmax over the scores,
-   and reports the top-3 classes per field.
-
-The longer version, with a pipeline diagram: [`docs/architecture.md`](docs/architecture.md).
-
-## Function-level provenance
-
-A whole-binary fingerprint gives one answer per binary; large real-world
-binaries are often built from several answers at once - a gcc main next to
-a clang-built vendored library. `compid functions <BIN>` reads function
-boundaries from the ELF symbol table (unstripped ELF, including relocatable
-`.o` files), scores each function with a per-function model, and prints one
-line per function. `scripts/mixed_demo.sh` is the proof, run end to end:
-one corpus source compiled with gcc `-O2`, another with `zig cc -O2`,
-linked into a single binary - and the model separates the halves using only
-each function's own bytes:
-
-```text
-$ scripts/mixed_demo.sh
-=== compid functions mixed-demo --model model/functions.json ===
-binary: /tmp/tmp.MOPU9ZNszO/mixed-demo
-model:   model/functions.json (trained 2026-10-20, 20669 features)
-
-name                      addr  size  compiler_family        opt_level
-main                    0x1070   184  gcc          1.00   O2           0.88
-_start                  0x1130    38  gcc          1.00   O2           0.55
-bst_insert.constprop.0  0x1220   106  gcc          0.94   O2           0.71
-walk                    0x1290   343  gcc          0.55   O2           0.72
-height                  0x13f0  2075  gcc          0.59   O2           0.75
-zig_half_main           0x1c10   218  clang        1.00   O0           0.93
-op_inc                  0x1cf0     9  clang        1.00   O0           1.00
-op_sq                   0x1d00    30  clang        1.00   O0           1.00
-...
-11 functions; predicted families: clang=6, gcc=5
-
-gcc half: 4 functions -> gcc=4 (majority gcc)
-zig half: 6 functions -> clang=6 (majority clang)
-MIXED-DEMO SPLIT OK: gcc half -> gcc, zig half -> clang
-```
-
-The script asserts the split, so the acceptance is mechanical: exit 0 only
-when each half's majority matches its toolchain. Function-level training
-data comes from `compid functions-batch --features` into
-`training/train_functions.py`, whose hold-out split is by build (all
-functions of one binary stay on the same side) - the honest numbers and the
-limitations live in [`docs/FUNCTIONS-EVALUATION.md`](docs/FUNCTIONS-EVALUATION.md).
-A stripped x86-64 ELF works too: a conservative prologue scan proposes the
-boundaries (pooled precision 0.98 / recall 0.86 measured against symbol
-ground truth), and the mixed-demo script runs the same split assertion on a
-`strip`ped copy; PE/Mach-O symbol sources are next.
+`arch` covers x86-64, aarch64, riscv64, and arm32; `os` separates ELF Linux,
+PE Windows, and Mach-O macOS; `hardening` detects the stack-protector /
+fortify / CET build flavor. Skewed axes are fitted class-weighted, and their
+macro-F1 says so honestly. Full per-class breakdowns:
+[`docs/EVALUATION.md`](docs/EVALUATION.md).
 
 ## The seed dataset
 
-Honesty first: the seed matrix is exactly what this machine could build on the
-day the dataset was generated - the system gcc, plus a zig `cc` driver for
-clang-family builds with musl and aarch64 cross-targets where available. It is
-a start, not a benchmark. Predictions are only as good as the matrix behind
-them, and a binary built by a toolchain the seed never saw will get confident
-wrong answers.
+<div align="center"><img src="docs/dataset.png" alt="donut chart of 1389 builds by OS - linux 1087, macos 204, windows 98 - plus a bar chart of builds per architecture" width="700"></div>
 
-Evaluation on the current seed is tracked in the table below, filled from
-reproducible held-out runs of the trainer (80/20 stratified split, seed 42).
-The full report - per-class breakdowns, baselines, and the honest weak
-spots - lives in [`docs/EVALUATION.md`](docs/EVALUATION.md).
+Every binary is compiled from one of 57 self-contained seed programs across a
+resumable, deterministic build matrix - nine cross targets through zig's `cc`
+driver plus the system gcc, with optimization, PIE, LTO, static-linking, and
+hardening axes. The pipeline is the product: grow the matrix, re-extract,
+retrain, and every number above refreshes from real held-out runs.
 
-| field | classes | rows | top-1 | top-3 |
-|-------|---------|------|-------|-------|
-| compiler_family | 2 | 1389 | 1.0000 | 1.0000 |
-| compiler_version | 2 | 1389 | 1.0000 | 1.0000 |
-| opt_level | 6 | 1389 | 0.8561 | 0.9964 |
-| arch | 4 | 1389 | 1.0000 | 1.0000 |
-| os | 3 | 1389 | 0.9964 | 1.0000 |
-| abi | 3 | 1389 | 0.9568 | 1.0000 |
-| pie | 3 | 1389 | 0.9928 | 1.0000 |
-| lto | 2 | 1389 | 0.8273 | 1.0000 |
-| static | 3 | 1389 | 0.9424 | 1.0000 |
-| hardening | 2 | 1389 | 0.9281 | 1.0000 |
+<details>
+<summary><strong>Inside one fingerprint</strong></summary>
 
-`arch` covers x86-64, aarch64, riscv64, and arm32; `os` separates ELF
-Linux, PE Windows, and Mach-O macOS; `hardening` detects the
-stack-protector/fortify/CET build flavor. `lto` and `hardening` are the
-skewed axes (48 and 30 rows against the majority) - the class-weighted fit
-beats their baselines, and their macro-F1 says so honestly. `opt_level`'s
-confusion is concentrated in O2/O3 pairs.
+`compid extract` turns a binary into one JSON object of integer counts over
+its executable sections: byte 3-grams, mnemonics, registers, immediates,
+section sizes, per-section entropy, clean 64-byte disassembly windows, and
+tokens from comment/note sections and import tables. One multinomial
+logistic regression per label field, fitted on L2-normalized counts,
+class-weighted for the skewed axes, exported as a human-readable
+`model/model.json` (`compid-model/v1`) that the Rust binary scores with no
+Python, no services, no network.
 
-Because a confident wrong answer is the worst outcome, `classify` flags
-abstention: any field whose top prediction falls below the confidence
-threshold (60% by default, tuned with `--confidence-threshold`) prints a
-`[low confidence]` marker, and the JSON output carries the same
-`low_confidence` flag per field. The threshold is not calibration - it is
-an honest, visible "the model is not sure here". Full calibration curves
-remain future work.
+</details>
 
-## Expanding the matrix
+<details>
+<summary><strong>Function-level provenance</strong></summary>
 
-Every row of the dataset is one (source, toolchain, flags) build recorded in
-`dataset/manifest.csv`. Adding a row is: add or enable a toolchain, let the
-corpus builder do its thing, re-run the trainer. New source programs, new
-compilers, and new flag axes all follow the same recipe - documented in
-[`corpus/README.md`](corpus/README.md) with format details in
-[`docs/dataset.md`](docs/dataset.md).
+Real binaries are stitched together from vendored libraries built by
+different toolchains. `compid functions <BIN>` reads the symbol table
+(unstripped ELF), the export table (PE DLLs), or a measured prologue +
+call-target scan (stripped x86-64 ELF) and predicts provenance **per
+function** - so a binary assembled from half gcc and half zig reads as
+exactly that:
+
+```console
+$ scripts/mixed_demo.sh
+gcc half: 4 functions -> gcc=4
+zig half: 6 functions -> clang=6
+MIXED-DEMO SPLIT OK
+```
+
+The stripped-binary boundary detector is measured against symbol ground
+truth rather than promised: pooled precision 0.98 / recall 0.87 / F1 0.95
+on a stratified 40-binary sweep. Per-function models: hold-out
+compiler-family top-1 0.9970 per function, 0.9950 by build majority.
+
+</details>
+
+<details>
+<summary><strong>All ten subcommands</strong></summary>
+
+| command | what it does |
+|---------|--------------|
+| `compid classify <BIN>` | per-field softmax predictions, top-3 with confidence bars, `--json`, abstention flagging below `--confidence-threshold` (default 0.6) |
+| `compid report <BIN>` | one rich screen: classification, why, provenance |
+| `compid explain <BIN>` | the top contributing features behind each predicted class |
+| `compid functions <BIN>` | per-function provenance (symbol table, export table, or measured prologue + call-target scan for stripped x86-64); `--measure` scores the boundaries |
+| `compid compare <A> <B>` | cosine similarity between two fingerprints |
+| `compid extract <BIN>` | the raw feature JSON (trainer input) |
+| `compid functions-batch <MANIFEST>` | per-function extraction across the dataset |
+| `compid batch <MANIFEST>` | whole-binary extraction across the dataset |
+| `compid dataset-info` | label distributions from the manifest |
+| `compid model-info` | fields, classes, and dataset provenance of a model file |
+
+</details>
+
+## How it works
+
+```mermaid
+flowchart LR
+    A["corpus sources<br/>57 C/C++ programs"] --> B["build matrix<br/>1389 builds - 9 targets"]
+    B --> C["extract<br/>ng / mn / rg / cn / sec / ent / cmt"]
+    C --> D["train<br/>10 per-field models"]
+    D --> E["model/model.json"]
+    F["any binary<br/>ELF - PE - Mach-O"] --> G["extract"] --> H["classify<br/>confidence + abstention"]
+    E --> H
+    G --> I["functions<br/>per-function provenance"]
+    E --> I
+```
+
+The inference path is a single Rust binary: it parses the container with
+[goblin](https://docs.rs/goblin), disassembles with
+[yaxpeax-x86](https://docs.rs/yaxpeax-x86), and scores a compact
+`model.json` you can read with a text editor. Robustness is tested, not
+hoped for: a deterministic 3,256-case mutation fuzzer runs every parsing
+path under malformed input in CI, and five overflow panics found that way
+are fixed and regression-pinned.
 
 ## How compid compares
 
@@ -236,49 +180,29 @@ FLIRT, from IDA Pro, answers a related but different question - which
 *library function* is this - by matching byte signatures against IDA's own
 library packs, and it lives inside IDA. BinDiff *diffs* two binaries you
 already know something about; it does not guess provenance. The academic
-compiler-fingerprinting literature produces interesting datasets, but they are
-research artifacts: frozen at publication time, rarely maintained, and seldom
-shipped as a tool you can run on yesterday's sample. `compid` makes a
+compiler-fingerprinting literature produces interesting datasets, but they
+are research artifacts: frozen at publication time, rarely maintained, and
+seldom shipped as a tool you can run on yesterday's sample. `compid` makes a
 different bet: generate the dataset from the toolchains you actually care
 about, keep the model small and interpretable, and make the whole loop -
-build, extract, train, classify - something you can re-run end to end. None
-of these tools conflict; compid is a first pass that the heavier ones can sit
-on top of.
+build, extract, train, classify - something you can re-run end to end.
 
-## Roadmap
+## Releases
 
-The near list, from [`docs/roadmap.md`](docs/roadmap.md):
-
-- macOS dataset rows - the classifier already reads Mach-O (x86-64 and
-  arm64) artifacts, and retrains on macos rows once the build matrix
-  seeds them
-- more architectures - riscv64 and arm32 alongside x86-64 and aarch64
-- function-level classification - unstripped ELF and stripped x86-64 ELF
-  (prologue heuristic) done (see above); PE/Mach-O symbol sources remain
-- Ghidra and IDA plugins that load `model.json` directly
-- online model updates without a full retrain
-
-## Repository layout
-
-```
-compid/
-├── src/         Rust: extractor, model reader, the six subcommands
-├── corpus/      Python: builds the seed matrix on the current machine
-├── training/    Python: turns manifest + features into model.json
-├── dataset/     manifest.csv (committed), binaries/ (local), features/ (committed)
-├── model/       model.json (committed)
-├── docs/        architecture, dataset, model format, roadmap, CLI
-├── examples/    illustrative demo session
-├── tests/       cargo tests and fixtures
-└── scripts/     small helpers
-```
+Tag a version (`git tag v0.2.0 && git push --tags`) and the release
+workflow builds x86-64 and aarch64 tarballs with the binary, shell
+completions for bash/zsh/fish/PowerShell, the man page, and docs -
+byte-reproducibly, with sha256 checksums.
 
 ## Contributing
 
-Bug reports, dataset expansion, and documentation fixes are all welcome - see
-[`CONTRIBUTING.md`](CONTRIBUTING.md) for the setup and the ground rules.
+The dataset grows the same way the code does: add a toolchain or target to
+the matrix, rebuild, re-extract, retrain, and commit the refreshed manifest,
+features, and model together. See
+[CONTRIBUTING.md](CONTRIBUTING.md) and the
+[roadmap](docs/roadmap.md) - function-level provenance for PE/Mach-O,
+warm-started model blending, and calibration curves are the open fronts.
 
 ## License
 
-`compid` is dual-licensed under the MIT license or the Apache License,
-Version 2.0, at your option - see [`LICENSE`](LICENSE).
+Dual-licensed under [MIT OR Apache-2.0](LICENSE), your choice.
