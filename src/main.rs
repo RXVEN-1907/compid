@@ -37,7 +37,7 @@ struct Cli {
 enum Cmd {
     /// Print (or write) the feature JSON for one binary
     Extract {
-        /// Path to the ELF or PE binary
+        /// Path to an ELF, PE, or Mach-O binary
         bin: PathBuf,
         /// Write the JSON to this file instead of stdout
         #[arg(short, long, value_name = "FILE")]
@@ -45,7 +45,7 @@ enum Cmd {
     },
     /// Predict provenance labels with a trained model
     Classify {
-        /// Path to the ELF or PE binary
+        /// Path to an ELF, PE, or Mach-O binary
         bin: PathBuf,
         /// Trained model file
         #[arg(long, value_name = "FILE", default_value = "model/model.json")]
@@ -56,7 +56,7 @@ enum Cmd {
     },
     /// Show which features drive each predicted label
     Explain {
-        /// Path to the ELF or PE binary
+        /// Path to an ELF, PE, or Mach-O binary
         bin: PathBuf,
         /// Trained model file
         #[arg(long, value_name = "FILE", default_value = "model/model.json")]
@@ -67,9 +67,9 @@ enum Cmd {
     },
     /// Cosine similarity between two binaries' feature vectors
     Compare {
-        /// First ELF or PE binary
+        /// First ELF, PE, or Mach-O binary
         a: PathBuf,
-        /// Second ELF or PE binary
+        /// Second ELF, PE, or Mach-O binary
         b: PathBuf,
     },
     /// Summarize label distributions from a manifest CSV

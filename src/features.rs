@@ -1,5 +1,6 @@
-//! Feature extraction: turn parsed binary material ([`ElfInfo`] or
-//! [`PeInfo`]) into the tf feature map the trainer and the classifier share.
+//! Feature extraction: turn parsed binary material ([`ElfInfo`],
+//! [`PeInfo`], or [`MachoInfo`]) into the tf feature map the trainer and the
+//! classifier share.
 //!
 //! Feature keys, exactly as the project contract defines them:
 //!
@@ -11,8 +12,9 @@
 //! | `cn:<hex>` | immediate constants masked to 32 bits |
 //! | `sec:<s>` | floor(log2(section size)) for each named section |
 //! | `ent:<s>` | Shannon-entropy bucket 0..=8 of each section's bytes |
-//! | `meta:windows` | number of cleanly disassembling 64-byte windows |
-//! | `cmt:<tok>` | tokens from the `.comment` section; import-table DLL names on PE |
+//! | `meta:windows` | number of cleanly disassembling 64-byte windows (ELF and PE) |
+//! | `meta:macos` | the same count on Mach-O; the macOS container marker |
+//! | `cmt:<tok>` | tokens from the `.comment` section; import-table DLL names on PE; dylib load-command names on Mach-O |
 //!
 //! Disassembly windows are consecutive non-overlapping 64-byte chunks of
 //! `.text`. A window "disassembles cleanly" when decoding from its first
@@ -26,6 +28,7 @@
 //! time, never in the stored JSON.
 
 use crate::elfinfo::{ElfInfo, SectionInfo};
+use crate::machoinfo::MachoInfo;
 use crate::peinfo::PeInfo;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -84,11 +87,16 @@ struct Source<'a> {
     sections: &'a [SectionInfo],
     section_bytes: &'a dyn Fn(usize, u64) -> Vec<u8>,
     /// Residue tokens counted as `cmt:` features: `.comment` banners on
-    /// ELF, import-table DLL names on PE.
+    /// ELF, import-table DLL names on PE, dylib load-command names on
+    /// Mach-O.
     tokens: Vec<String>,
+    /// The `meta:` key the clean-window count lands under: `meta:windows`
+    /// on ELF and PE, `meta:macos` on Mach-O (the macOS container marker,
+    /// mirroring how `meta:windows` doubles as the PE one).
+    meta_key: &'static str,
     /// Run x86-64 long-mode disassembly over `text`. False skips the
-    /// mnemonic/register/immediate features (and leaves `meta:windows`
-    /// at 0) for code bytes this decoder cannot read, e.g. an aarch64 PE.
+    /// mnemonic/register/immediate features (and leaves the window count at
+    /// 0) for code bytes this decoder cannot read, e.g. an arm64 Mach-O.
     disassemble: bool,
 }
 
@@ -123,7 +131,7 @@ fn extract_source(src: Source) -> ExtractedFeatures {
             }
         }
     }
-    ef.features.insert("meta:windows".to_string(), windows);
+    ef.features.insert(src.meta_key.to_string(), windows);
 
     // Section geometry and byte entropy.
     for s in src.sections {
@@ -168,6 +176,7 @@ pub fn extract(info: &ElfInfo) -> Result<ExtractedFeatures> {
             .as_deref()
             .map(comment_tokens)
             .unwrap_or_default(),
+        meta_key: "meta:windows",
         disassemble: true,
     }))
 }
@@ -208,6 +217,51 @@ pub fn extract_pe(info: &PeInfo) -> Result<ExtractedFeatures> {
             .iter()
             .map(|lib| lib.to_ascii_lowercase())
             .collect(),
+        meta_key: "meta:windows",
+        disassemble: info.disassembles_x86_64(),
+    }))
+}
+
+/// Extract the full feature map from parsed Mach-O material. Dylib
+/// load-command names share the `cmt:` namespace - they are the strongest
+/// OS signal a macOS binary carries. The clean-window count files under
+/// `meta:macos`, the container marker mirroring PE's `meta:windows`. A
+/// non-x86-64 Mach-O (arm64 today) yields the byte-level features only,
+/// with `meta:macos` at 0.
+pub fn extract_macho(info: &MachoInfo) -> Result<ExtractedFeatures> {
+    let text = match &info.text {
+        Some(t) if !t.is_empty() => t,
+        Some(_) => bail!("binary has an empty __TEXT,__text section; nothing to fingerprint"),
+        None => bail!(
+            "binary has no readable __TEXT,__text section (segment load commands absent or \
+             the section holds no file bytes); compid needs Mach-O segment load commands \
+             to find executable bytes"
+        ),
+    };
+
+    let l = &info.labels;
+    Ok(extract_source(Source {
+        labels: Labels {
+            compiler_family: l.compiler_family.clone(),
+            compiler_version: l.compiler_version.clone(),
+            opt_level: l.opt_level.clone(),
+            arch: l.arch.clone(),
+            os: l.os.clone(),
+            abi: l.abi.clone(),
+            pie: l.pie.clone(),
+            lto: l.lto.clone(),
+            static_linking: l.static_linking.clone(),
+        },
+        build_id: &info.build_id,
+        text,
+        sections: &info.sections,
+        section_bytes: &|offset, size| info.section_data(offset, size),
+        tokens: info
+            .libraries
+            .iter()
+            .map(|lib| lib.to_ascii_lowercase())
+            .collect(),
+        meta_key: "meta:macos",
         disassemble: info.disassembles_x86_64(),
     }))
 }
