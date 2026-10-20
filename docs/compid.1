@@ -80,18 +80,24 @@ extractor also works standalone to dump raw features. Output for a given
 (binary, model, feature schema) triple is deterministic, so outputs are
 diffable.
 .PP
-Defaults that matter: \-\-model defaults to
+Defaults that matter: \-\-model resolution is an explicit path, then
 .I model/model.json
+relative to the current directory, then the model embedded in the binary
+at build time \-
+released
+.B compid
+binaries are self-contained and classify with no files beside them
 (\-\-model on
 .B functions
-defaults to
-.IR model/functions.json ),
-and \-\-manifest on
+resolves
+.IR model/functions.json )
+; \-\-manifest on
 .B dataset\-info
 defaults to
 .IR dataset/manifest.csv .
-All three resolve relative to the current directory; pass them explicitly
-when running from elsewhere.
+An explicitly passed model path must exist;
+.B functions\ \-\-no\-model
+lists functions without predictions.
 .SH COMMANDS
 .SS compid extract
 .B compid extract
