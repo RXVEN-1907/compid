@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Colored terminal output and a `compid report` one-screen summary. A
+  small in-tree ANSI engine (`src/term.rs`, no external crates) renders
+  the human tables with a restrained palette: lavender block-character
+  bars, the winning class in green, probabilities and metadata dimmed,
+  field names and section headers bold, and the `[low confidence]` marker
+  in amber. `classify`, `explain`, `functions`, and the new `report`
+  subcommand take `--color <auto|always|never>` (default `auto`): color
+  appears only when stdout is a terminal, `NO_COLOR` (set and non-empty)
+  keeps it plain, an explicit `--color always` forces it on for pipes,
+  and `--color never` reproduces the previous byte-for-byte output. JSON
+  outputs are never colored. `compid report <BIN>` combines the
+  classification table, two-line contributor excerpts for the four most
+  confident fields, and the model's provenance block with 12-hex-char
+  sha256 short forms; `--json` emits one object combining the
+  classification with the full provenance. Plain (non-colored) output is
+  pinned by tests to stay byte-identical.
 - Parsing-path robustness: a deterministic, in-tree mutation fuzzer
   (`tests/robustness_test.rs`, no external crates, no nightly) that runs
   on every `cargo test` and corrupts each committed fixture in

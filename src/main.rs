@@ -1,6 +1,6 @@
 //! compid - binary provenance classifier.
 //!
-//! One binary, eight subcommands plus a hidden completions helper:
+//! One binary, ten subcommands plus a hidden completions helper:
 //!
 //! - `extract <BIN>`: print the feature JSON for one binary
 //! - `classify <BIN>`: predict provenance labels with a trained model
@@ -10,13 +10,15 @@
 //! - `batch <MANIFEST>`: extract features for every listed binary
 //! - `functions <BIN>`: per-function provenance table or training features
 //! - `functions-batch <MANIFEST>`: per-function extraction over a manifest
+//! - `model-info`: describe a trained model file
+//! - `report <BIN>`: one screen - classification, why, provenance
 //! - `completions <SHELL>`: print a shell completion script (hidden)
 
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use compid::{
     extract_binary, extract_binary_functions, features, functions, manifest,
-    measure_binary_functions, model, report,
+    measure_binary_functions, model, report, term,
 };
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -62,6 +64,9 @@ enum Cmd {
         /// (0 disables flagging)
         #[arg(long, value_name = "P", default_value_t = 0.6)]
         confidence_threshold: f64,
+        /// When to color the table: auto, always, or never (JSON stays plain)
+        #[arg(long, value_name = "WHEN", default_value = "auto")]
+        color: term::ColorChoice,
     },
     /// Show which features drive each predicted label
     Explain {
@@ -73,6 +78,9 @@ enum Cmd {
         /// Emit machine-readable JSON instead of text
         #[arg(long)]
         json: bool,
+        /// When to color the output: auto, always, or never (JSON stays plain)
+        #[arg(long, value_name = "WHEN", default_value = "auto")]
+        color: term::ColorChoice,
     },
     /// Cosine similarity between two binaries' feature vectors
     Compare {
@@ -112,6 +120,9 @@ enum Cmd {
         /// (needs an unstripped ELF) instead of listing functions
         #[arg(long)]
         measure: bool,
+        /// When to color the table: auto, always, or never (JSON stays plain)
+        #[arg(long, value_name = "WHEN", default_value = "auto")]
+        color: term::ColorChoice,
     },
     /// Per-function extraction over every manifest row whose binary has functions (unstripped ELF; stripped x86-64 ELF via the heuristic)
     FunctionsBatch {
@@ -129,6 +140,24 @@ enum Cmd {
         /// Trained model file to describe
         #[arg(long, value_name = "FILE", default_value = "model/model.json")]
         model: PathBuf,
+    },
+    /// One screen: classification, top contributors, and model provenance
+    Report {
+        /// Path to an ELF, PE, or Mach-O binary
+        bin: PathBuf,
+        /// Trained model file
+        #[arg(long, value_name = "FILE", default_value = "model/model.json")]
+        model: PathBuf,
+        /// Emit machine-readable JSON instead of a table
+        #[arg(long)]
+        json: bool,
+        /// Flag fields whose top prediction is below this probability
+        /// (0 disables flagging)
+        #[arg(long, value_name = "P", default_value_t = 0.6)]
+        confidence_threshold: f64,
+        /// When to color the screen: auto, always, or never (JSON stays plain)
+        #[arg(long, value_name = "WHEN", default_value = "auto")]
+        color: term::ColorChoice,
     },
     /// Print a shell completion script to stdout (hidden from --help)
     #[command(hide = true)]
@@ -167,8 +196,14 @@ fn run(cmd: Cmd) -> Result<()> {
             model,
             json,
             confidence_threshold,
-        } => cmd_classify(&bin, &model, json, confidence_threshold),
-        Cmd::Explain { bin, model, json } => cmd_explain(&bin, &model, json),
+            color,
+        } => cmd_classify(&bin, &model, json, confidence_threshold, color),
+        Cmd::Explain {
+            bin,
+            model,
+            json,
+            color,
+        } => cmd_explain(&bin, &model, json, color),
         Cmd::Compare { a, b } => cmd_compare(&a, &b),
         Cmd::DatasetInfo { manifest } => cmd_dataset_info(&manifest),
         Cmd::Batch { manifest, out } => cmd_batch(&manifest, out.as_deref()),
@@ -178,11 +213,12 @@ fn run(cmd: Cmd) -> Result<()> {
             features,
             json,
             measure,
+            color,
         } => {
             if measure {
                 return cmd_functions_measure(&bin, json);
             }
-            cmd_functions(&bin, model.as_deref(), features.as_deref(), json)
+            cmd_functions(&bin, model.as_deref(), features.as_deref(), json, color)
         }
         Cmd::FunctionsBatch {
             manifest,
@@ -190,6 +226,13 @@ fn run(cmd: Cmd) -> Result<()> {
             features,
         } => cmd_functions_batch(&manifest, out.as_deref(), features),
         Cmd::ModelInfo { model } => cmd_model_info(&model),
+        Cmd::Report {
+            bin,
+            model,
+            json,
+            confidence_threshold,
+            color,
+        } => cmd_report(&bin, &model, json, confidence_threshold, color),
         Cmd::Completions { shell } => cmd_completions(shell),
     }
 }
@@ -273,6 +316,7 @@ fn cmd_classify(
     model_path: &Path,
     json: bool,
     confidence_threshold: f64,
+    color: term::ColorChoice,
 ) -> Result<()> {
     if !(0.0..=1.0).contains(&confidence_threshold) {
         bail!("--confidence-threshold must be between 0 and 1");
@@ -281,6 +325,7 @@ fn cmd_classify(
     let m = load_model(model_path)?;
     let ef = extract_binary(bin)?;
     let pred = m.predict(&ef.features);
+    let paint = term::Painter::for_choice(color);
     let text = report::classification(
         bin,
         model_path,
@@ -289,16 +334,50 @@ fn cmd_classify(
         &pred,
         json,
         threshold,
+        &paint,
     );
     println!("{text}");
     Ok(())
 }
 
-fn cmd_explain(bin: &Path, model_path: &Path, json: bool) -> Result<()> {
+fn cmd_explain(bin: &Path, model_path: &Path, json: bool, color: term::ColorChoice) -> Result<()> {
     let m = load_model(model_path)?;
     let ef = extract_binary(bin)?;
     let pred = m.predict(&ef.features);
-    let text = report::explain(bin, &pred, json);
+    let paint = term::Painter::for_choice(color);
+    let text = report::explain(bin, &pred, json, &paint);
+    println!("{text}");
+    Ok(())
+}
+
+/// The `report` screen: the same model, extraction, and prediction path as
+/// classify, rendered as one rich view by `report::report_screen`.
+fn cmd_report(
+    bin: &Path,
+    model_path: &Path,
+    json: bool,
+    confidence_threshold: f64,
+    color: term::ColorChoice,
+) -> Result<()> {
+    if !(0.0..=1.0).contains(&confidence_threshold) {
+        bail!("--confidence-threshold must be between 0 and 1");
+    }
+    let threshold = (confidence_threshold > 0.0).then_some(confidence_threshold);
+    let m = load_model(model_path)?;
+    let ef = extract_binary(bin)?;
+    let pred = m.predict(&ef.features);
+    let paint = term::Painter::for_choice(color);
+    let text = report::report_screen(
+        bin,
+        model_path,
+        &m.header_line(),
+        m.provenance.as_ref(),
+        &ef,
+        &pred,
+        threshold,
+        json,
+        &paint,
+    );
     println!("{text}");
     Ok(())
 }
@@ -486,6 +565,7 @@ fn cmd_functions(
     model_arg: Option<&Path>,
     features_out: Option<&Path>,
     json: bool,
+    color: term::ColorChoice,
 ) -> Result<()> {
     let ex = extract_binary_functions(bin)?;
 
@@ -539,6 +619,7 @@ fn cmd_functions(
     let model_line = model_line
         .as_ref()
         .map(|(p, h)| (std::path::Path::new(p), h.as_str()));
+    let paint = term::Painter::for_choice(color);
     let text = report::function_provenance(
         bin,
         &ex.build_id,
@@ -546,6 +627,7 @@ fn cmd_functions(
         model_line,
         ex.source,
         &rows,
+        &paint,
     );
     println!("{text}");
     Ok(())

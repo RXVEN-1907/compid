@@ -104,6 +104,8 @@ arch: x86_64 (99.8% confidence)
     rg:rax         +0.2038  (tf=25)
 ```
 
+In a terminal these tables render in color automatically - lavender bars, green winners, dim metadata - and the rendering respects the `NO_COLOR` standard, so piping or redirecting keeps the output plain.
+
 See [`examples/demo-transcript.md`](examples/demo-transcript.md) for a fuller
 real session and [`docs/cli.md`](docs/cli.md) for every subcommand and
 flag - `compid --help` always describes the exact CLI you have installed.

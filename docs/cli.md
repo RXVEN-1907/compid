@@ -1,6 +1,6 @@
 # CLI reference
 
-compid ships as one binary with eight subcommands plus a hidden completions
+compid ships as one binary with ten subcommands plus a hidden completions
 helper. `compid --help` and `compid <subcommand> --help` describe the exact
 CLI of the installed build; this page explains the shape and the defaults
 behind them.
@@ -15,6 +15,26 @@ Defaults that matter:
   pass it explicitly when classifying from elsewhere. The per-function
   `functions` subcommand defaults to `model/functions.json` instead.
 - `--manifest` on `dataset-info` defaults to `dataset/manifest.csv`.
+
+## Output color
+
+`classify`, `explain`, `functions`, and `report` accept
+`--color <auto|always|never>` (default `auto`):
+
+- `auto` colors the output only when stdout is a terminal, and only when
+  the `NO_COLOR` environment variable is unset or empty - the no-color.org
+  convention. Piping, redirecting, or exporting `NO_COLOR=1` keeps the
+  output plain, byte-for-byte identical to the uncolored form.
+- `always` forces color on even through a pipe (an explicit flag overrides
+  the `NO_COLOR` preference); useful for paging a colored run or capturing
+  a screenshot.
+- `never` disables color outright.
+
+The palette is restrained on purpose: lavender bars and accents, green for
+the winning class, dim for probabilities and metadata, amber for the
+`[low confidence]` marker and boundary cautions. Top-3 bars render as block
+characters when colored and as ASCII `#` runs when not. `--json` output is
+never colored under any setting.
 
 ## compid extract
 
@@ -41,7 +61,7 @@ construction), and the dylib load-command names as lowercase basename
 ## compid classify
 
 ```text
-compid classify <BIN> [--model PATH] [--json]
+compid classify <BIN> [--model PATH] [--json] [--color auto|always|never]
 ```
 
 Loads the model, extracts features from `<BIN>`, and prints, for each label
@@ -72,7 +92,7 @@ sees.
 ## compid explain
 
 ```text
-compid explain <BIN> [--model PATH]
+compid explain <BIN> [--model PATH] [--color auto|always|never]
 ```
 
 For the top predicted class of each field, lists the features that
@@ -138,7 +158,7 @@ present.
 ## compid functions
 
 ```text
-compid functions <BIN> [--model PATH] [--features FILE] [--json] [--measure]
+compid functions <BIN> [--model PATH] [--features FILE] [--json] [--measure] [--color auto|always|never]
 ```
 
 Per-function provenance for one binary. Function boundaries come from the
@@ -225,6 +245,27 @@ $ compid functions-batch dataset/manifest.csv --features --out dataset/features/
 
 The functions JSONL is a regeneration artifact like `train.jsonl`: rebuild
 it from the manifest and binaries rather than committing it.
+
+## compid report
+
+```text
+compid report <BIN> [--model PATH] [--json] [--confidence-threshold P] [--color auto|always|never]
+```
+
+One screen that answers "what is this and why" without running three
+commands: the classification table (the same render `classify` prints,
+including the binary and model header and the `[low confidence]` markers),
+then a two-line explain excerpt for each of the four most confident fields -
+the winning class plus its top three contributing features - and finally the
+model's provenance block, with the manifest and feature sha256 digests in a
+12-hex-character short form so the screen stays narrow. Field order in the
+excerpt section is by confidence, most confident first.
+
+`--json` swaps the screen for a single machine-readable object: the binary
+and model header, the full classification object (identical to
+`compid classify --json`, low-confidence flags included), and the provenance
+block with full digests. `--confidence-threshold` behaves exactly as on
+`classify`.
 
 ## compid completions
 

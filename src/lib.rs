@@ -7,7 +7,9 @@
 //! architecture, OS, libc, PIE, LTO, and linkage with confidence scores.
 //! Predictions come from a small linear model (`model/model.json`) that the
 //! Python trainer in `training/` produces from a self-generated
-//! build-fingerprint corpus.
+//! build-fingerprint corpus. Human-facing output renders through
+//! [`report`], colored by the small ANSI engine in [`term`] when the
+//! terminal allows it.
 
 pub mod elfinfo;
 pub mod features;
@@ -17,6 +19,7 @@ pub mod manifest;
 pub mod model;
 pub mod peinfo;
 pub mod report;
+pub mod term;
 
 use anyhow::{bail, Context, Result};
 use goblin::mach::header as mh;
