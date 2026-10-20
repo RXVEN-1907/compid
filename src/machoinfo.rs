@@ -186,6 +186,8 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<MachoInfo> {
                 offset,
                 size: sect.size,
                 no_bits,
+                addr: sect.addr,
+                executable: segname == "__TEXT",
             });
         }
     }

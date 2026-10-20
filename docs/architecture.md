@@ -139,16 +139,25 @@ clang-built vendored library, a musl static libc. `compid functions`
 re-runs the feature core at function granularity so each answer can be
 found separately:
 
-- **Boundaries.** Function ranges come from the ELF symbol table this
-  round: SHT_SYMTAB entries of type STT_FUNC with a nonzero size,
-  deduplicated by `(st_value, st_size)`, resolved to file offsets through
-  their containing executable section. Relocatable objects (`.o`) are
-  first-class - in `ET_REL` the symbol value is a section offset, in a
-  linked binary it is a virtual address. Names stay raw; nothing is
-  demangled. A stripped ELF, a PE, or a Mach-O yields an empty function
-  list with an explicit reason - boundaries are never guessed. Stripped
-  binary heuristics (prologue patterns, call targets, alignment padding)
-  and PE/Mach-O symbol sources are the next rounds.
+- **Boundaries.** Function ranges come from two sources. Unstripped ELF
+  (and relocatable objects): SHT_SYMTAB entries of type STT_FUNC with a
+  nonzero size, deduplicated by `(st_value, st_size)`, resolved to file
+  offsets through their containing executable section - in `ET_REL` the
+  symbol value is a section offset, in a linked binary it is a virtual
+  address. Names stay raw; nothing is demangled. Stripped x86-64 ELF: a
+  conservative prologue scan over the executable sections (one const
+  pattern array in `src/functions.rs` - frame-pointer prologues, CET
+  `endbr64` sites with alignment and PLT-stub gates, the crt-stub
+  paired-`lea` shape) proposes the starts, each named `func_<hex addr>`,
+  with candidates merged by straight-line decode overlap and functions
+  under 16 bytes dropped; the result is marked `source: heuristic`. The
+  scan is measured against symbol-table ground truth - `compid functions
+  <BIN> --measure` prints per-binary precision/recall, and the pooled
+  numbers live in `docs/FUNCTIONS-EVALUATION.md` (pooled 0.98 precision,
+  0.86 recall over a 40-binary O0-Os sweep). A stripped non-x86-64 ELF, a
+  PE, or a Mach-O yields an empty function list with an explicit reason -
+  boundaries are never guessed for architectures the scanner does not
+  read. PE/Mach-O symbol sources are the next rounds.
 - **Features.** Each function gets the same byte- and code-shape
   namespaces scoped to exactly its own bytes: `ng:`, `mn:`, `rg:`, `cn:`,
   plus a one-hot size bucket `fn:<floor(log2(bytes))>` clamped to 0..=24
@@ -174,7 +183,9 @@ found separately:
   `scripts/mixed_demo.sh` is the worked example: two corpus sources built
   with gcc and zig cc, linked into one binary, with the mechanical
   assertion that each half's functions majority-predict their own
-  toolchain.
+  toolchain - run twice, unstripped (attribution by symbol name) and on a
+  `strip`ped copy (attribution by address, exercising the prologue
+  heuristic).
 
 ## On-disk layout
 

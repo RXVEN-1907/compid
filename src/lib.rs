@@ -60,9 +60,10 @@ pub fn extract_binary(path: &Path) -> Result<features::ExtractedFeatures> {
 
 /// Read a binary from disk and extract per-function features in one step.
 /// Same container detection as [`extract_binary`]. Function boundaries come
-/// from the ELF symbol table (unstripped ELF, and relocatable objects);
-/// PE and Mach-O yield an empty function list with a reason, and a stripped
-/// ELF does the same.
+/// from the ELF symbol table (unstripped ELF, and relocatable objects) or,
+/// for a stripped x86-64 ELF, from the conservative prologue heuristic in
+/// [`functions`] (marked `source: Heuristic` in the result). PE and Mach-O
+/// yield an empty function list with a reason.
 pub fn extract_binary_functions(path: &Path) -> Result<functions::FunctionsExtraction> {
     let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
     let data = std::sync::Arc::new(data);
@@ -91,4 +92,20 @@ pub fn extract_binary_functions(path: &Path) -> Result<functions::FunctionsExtra
             path.display()
         );
     }
+}
+
+/// Measure the stripped-binary prologue heuristic against symbol-table
+/// ground truth for one ELF on disk. The inverse of the functions path's
+/// usual direction: pass an unstripped binary, get precision/recall of the
+/// heuristic's starts against the symbol table's starts (see
+/// [`functions::measure_boundaries`]). Errors for a non-ELF file.
+pub fn measure_binary_functions(path: &Path) -> Result<functions::BoundaryMetrics> {
+    let data = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    if data.len() < 4 || &data[0..4] != b"\x7fELF" {
+        bail!(
+            "{}: boundary measurement needs an ELF binary (\\x7fELF magic missing)",
+            path.display()
+        );
+    }
+    functions::measure_boundaries(&elfinfo::parse(std::sync::Arc::new(data))?)
 }

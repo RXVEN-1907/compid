@@ -138,11 +138,11 @@ present.
 ## compid functions
 
 ```text
-compid functions <BIN> [--model PATH] [--features FILE] [--json]
+compid functions <BIN> [--model PATH] [--features FILE] [--json] [--measure]
 ```
 
 Per-function provenance for one binary. Function boundaries come from the
-ELF symbol table, so the input must be an unstripped ELF - a relocatable
+ELF symbol table, so the input should be an unstripped ELF - a relocatable
 `.o` works too. The table lists each function's raw (never demangled)
 symbol name, its address as the symbol table records it, its size, and -
 when a function-level model is loaded - the predicted `compiler_family`
@@ -164,8 +164,15 @@ op_inc                  0x1cf0     9  clang        1.00   O0           1.00
 11 functions; predicted families: clang=6, gcc=5
 ```
 
-A binary with no usable functions (a stripped ELF, or a PE/Mach-O) prints
-the reason instead of a table and exits 0. `--model` defaults to
+A stripped x86-64 ELF takes the fallback path: a conservative prologue scan
+over the executable sections proposes the function starts (see
+`docs/FUNCTIONS-EVALUATION.md` for the measured precision and recall), each
+start is named `func_<hex addr>`, and the table carries a header note -
+`function boundaries: prologue heuristic (stripped binary)` - so synthesized
+names are never mistaken for symbol names. The `--json` output marks the
+source explicitly (`"source": "heuristic"` versus `"symbol_table"`). A
+stripped non-x86-64 ELF, a PE, and a Mach-O still print their explicit
+reasons instead of a table and exit 0. `--model` defaults to
 `model/functions.json` when that file exists; an explicitly passed `--model`
 that does not exist is an error. A model file carries only the two
 per-function fields, so the table never predicts container-level labels -
@@ -175,11 +182,24 @@ see `docs/FUNCTIONS-EVALUATION.md` for the per-function hold-out numbers.
 table: one object per function with `build_id`, `name`, `addr` (hex
 string), `size`, `labels` (the extractor's own best-effort container
 labels), and `features`. `--json` swaps the table for a machine-readable
-object with per-function predictions and the family tally.
+object with per-function predictions, the boundary source, and the family
+tally.
+
+`--measure` runs the honest self-check instead of the table: on an
+unstripped binary it re-runs the prologue scan and scores the heuristic's
+starts against the symbol table's starts at a ±8-byte tolerance, printing
+counts plus precision, recall, and F1 (`--json` for the machine-readable
+form). This is the command behind the measured numbers in
+`docs/FUNCTIONS-EVALUATION.md`; `scripts/measure_boundaries.py` sweeps it
+over a manifest sample. A stripped binary has no ground truth to measure
+against and errors out.
 
 `scripts/mixed_demo.sh` runs the end-to-end proof: two corpus sources
 compiled with gcc and zig cc, linked into one binary, with the assertion
-that each half's functions majority-predict their own toolchain.
+that each half's functions majority-predict their own toolchain - first
+unstripped (attribution by symbol name), then on a `strip`ped copy
+(attribution by address against the unstripped run), so the prologue
+heuristic is part of the acceptance, not a footnote.
 
 ## compid functions-batch
 
@@ -187,14 +207,17 @@ that each half's functions majority-predict their own toolchain.
 compid functions-batch <MANIFEST> [--out FILE] [--features]
 ```
 
-Runs per-function extraction over every manifest row whose binary is an
-unstripped ELF. With `--features`, writes the per-function training JSONL -
-one object per function with `build_id`, `name`, `addr`, `size`, `labels`
-(the manifest's ground-truth labels for that row, the same convention as
-`batch`), and `features` - which is the input `training/train_functions.py`
-expects. Without `--features`, writes a plain per-binary listing (name,
-address, size). Rows whose binary is missing, stripped, or not an ELF are
-skipped with a per-row stderr note and summarized in the final line.
+Runs per-function extraction over every manifest row whose binary exists
+and carries functions: unstripped ELF via the symbol table, stripped
+x86-64 ELF via the prologue heuristic. With `--features`, writes the
+per-function training JSONL - one object per function with `build_id`,
+`name`, `addr`, `size`, `labels` (the manifest's ground-truth labels for
+that row, the same convention as `batch`), and `features` - which is the
+input `training/train_functions.py` expects. Without `--features`, writes
+a plain per-binary listing (name, address, size). Rows whose binary is
+missing, yields no functions (a stripped non-x86-64 ELF, a PE, a Mach-O),
+or fails to parse are skipped with a per-row stderr note and summarized in
+the final line.
 
 ```console
 $ compid functions-batch dataset/manifest.csv --features --out dataset/features/functions.jsonl

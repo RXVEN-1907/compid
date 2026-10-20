@@ -15,7 +15,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use compid::{
-    extract_binary, extract_binary_functions, features, functions, manifest, model, report,
+    extract_binary, extract_binary_functions, features, functions, manifest,
+    measure_binary_functions, model, report,
 };
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -94,7 +95,7 @@ enum Cmd {
         #[arg(short, long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
-    /// Per-function provenance for one binary (unstripped ELF today)
+    /// Per-function provenance for one binary (unstripped ELF; stripped x86-64 ELF via the prologue heuristic)
     Functions {
         /// Path to an ELF binary (PE and Mach-O are reported as unsupported)
         bin: PathBuf,
@@ -107,8 +108,12 @@ enum Cmd {
         /// Emit machine-readable JSON instead of a table
         #[arg(long)]
         json: bool,
+        /// Measure the prologue heuristic against symbol-table ground truth
+        /// (needs an unstripped ELF) instead of listing functions
+        #[arg(long)]
+        measure: bool,
     },
-    /// Per-function extraction over every manifest row with an unstripped ELF binary
+    /// Per-function extraction over every manifest row whose binary has functions (unstripped ELF; stripped x86-64 ELF via the heuristic)
     FunctionsBatch {
         /// Manifest CSV listing binaries (build_id + path columns required)
         manifest: PathBuf,
@@ -172,7 +177,13 @@ fn run(cmd: Cmd) -> Result<()> {
             model,
             features,
             json,
-        } => cmd_functions(&bin, model.as_deref(), features.as_deref(), json),
+            measure,
+        } => {
+            if measure {
+                return cmd_functions_measure(&bin, json);
+            }
+            cmd_functions(&bin, model.as_deref(), features.as_deref(), json)
+        }
         Cmd::FunctionsBatch {
             manifest,
             out,
@@ -444,6 +455,32 @@ fn predict_function(
     }
 }
 
+/// Measure the stripped-binary prologue heuristic against symbol-table
+/// ground truth on one binary. Only meaningful on an unstripped ELF: the
+/// symbol table is the truth being measured against.
+fn cmd_functions_measure(bin: &Path, json: bool) -> Result<()> {
+    let m = measure_binary_functions(bin)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&m).context("JSON serialization failed")?
+        );
+        return Ok(());
+    }
+    println!("boundary measurement: {}", bin.display());
+    println!(
+        "method:    prologue heuristic vs symbol table (tolerance ±{} bytes)",
+        m.tolerance
+    );
+    println!("symbol starts:    {:>6}", m.symbol_starts);
+    println!("heuristic starts: {:>6}", m.heuristic_starts);
+    println!("matched:          {:>6}", m.matched);
+    println!("precision: {:.4}", m.precision);
+    println!("recall:    {:.4}", m.recall);
+    println!("f1:        {:.4}", m.f1);
+    Ok(())
+}
+
 fn cmd_functions(
     bin: &Path,
     model_arg: Option<&Path>,
@@ -502,8 +539,14 @@ fn cmd_functions(
     let model_line = model_line
         .as_ref()
         .map(|(p, h)| (std::path::Path::new(p), h.as_str()));
-    let text =
-        report::function_provenance(bin, &ex.build_id, ex.reason.as_deref(), model_line, &rows);
+    let text = report::function_provenance(
+        bin,
+        &ex.build_id,
+        ex.reason.as_deref(),
+        model_line,
+        ex.source,
+        &rows,
+    );
     println!("{text}");
     Ok(())
 }
@@ -514,7 +557,8 @@ fn cmd_functions(
 fn cmd_functions_features(ex: &functions::FunctionsExtraction, path: &Path) -> Result<()> {
     if ex.functions.is_empty() {
         bail!(
-            "no functions to write ({}): pass an unstripped ELF",
+            "no functions to write ({}): pass a binary with extractable \
+             functions, e.g. an unstripped ELF",
             ex.reason.as_deref().unwrap_or("empty function list")
         );
     }
@@ -584,6 +628,7 @@ fn functions_json(
         "binary": bin.display().to_string(),
         "model": model_path.map(|p| p.display().to_string()),
         "build_id": ex.build_id,
+        "source": ex.source,
         "reason": ex.reason,
         "functions": functions_out,
         "family_counts": family_counts,

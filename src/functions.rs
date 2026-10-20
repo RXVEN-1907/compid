@@ -9,20 +9,23 @@
 //! `sec:`/`ent:` geometry and no `cmt:` residue: those describe the
 //! container, not a function.
 //!
-//! Function boundaries come from the ELF symbol table this round:
-//! SHT_SYMTAB entries of type STT_FUNC with a nonzero `st_size`,
-//! deduplicated by `(st_value, st_size)`, raw (never demangled) names.
-//! That makes unstripped ELF (and relocatable objects) first-class; PE and
-//! Mach-O symbol sources, and heuristics for stripped binaries, remain
-//! future work. A stripped ELF, a PE, or a Mach-O yields an empty function
-//! list with a reason string instead of guessing boundaries.
+//! Function boundaries come from two sources. For an unstripped ELF (and
+//! relocatable objects): SHT_SYMTAB entries of type STT_FUNC with a nonzero
+//! `st_size`, deduplicated by `(st_value, st_size)`, raw (never demangled)
+//! names. For a stripped x86-64 ELF: a conservative prologue scan over the
+//! executable sections (see [`PROLOGUE_PATTERNS`]), with synthesized
+//! `func_<hex addr>` names. PE and Mach-O symbol sources remain future
+//! work; a PE, a Mach-O, or a non-x86-64 stripped ELF yields an empty
+//! function list with a reason string instead of guessing boundaries.
 
-use crate::elfinfo::ElfInfo;
+use crate::elfinfo::{ElfInfo, FunctionSymbol};
 use crate::features::{disassemble_window, log2_size, Labels, WINDOW_SIZE};
 use crate::machoinfo::MachoInfo;
 use crate::peinfo::PeInfo;
+use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use yaxpeax_arch::LengthedInstruction;
 use yaxpeax_x86::long_mode::InstDecoder;
 
 /// Upper clamp for the `fn:` size bucket (floor of log2 of the byte length).
@@ -42,6 +45,18 @@ pub struct FunctionFeatures {
     pub features: BTreeMap<String, u64>,
 }
 
+/// Where a [`FunctionsExtraction`]'s function boundaries came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FunctionSource {
+    /// ELF symbol table (SHT_SYMTAB function symbols): unstripped ELF and
+    /// relocatable objects.
+    SymbolTable,
+    /// Conservative prologue-pattern scan over the executable sections of a
+    /// stripped x86-64 ELF; names are synthesized (`func_<hex addr>`).
+    Heuristic,
+}
+
 /// Per-function extraction result for one binary. `functions` is empty
 /// exactly when `reason` is set.
 #[derive(Debug, Clone, Serialize)]
@@ -51,10 +66,13 @@ pub struct FunctionsExtraction {
     /// `compid extract` would report); batch mode replaces these with the
     /// manifest's ground-truth labels.
     pub labels: Labels,
+    /// How the function boundaries were found.
+    pub source: FunctionSource,
     /// One entry per function, ordered by address.
     pub functions: Vec<FunctionFeatures>,
-    /// Set when function-level extraction does not apply: a stripped ELF,
-    /// or a container whose symbol source is not implemented yet.
+    /// Set when function-level extraction does not apply: a container whose
+    /// symbol source is not implemented yet, or a stripped binary whose
+    /// executable sections held no heuristic candidates.
     pub reason: Option<String>,
 }
 
@@ -114,12 +132,381 @@ pub fn function_features(bytes: &[u8]) -> BTreeMap<String, u64> {
     f
 }
 
-/// Per-function extraction from parsed ELF material. A stripped ELF (or one
-/// whose symtab holds no usable function symbols) yields an empty list with
-/// a reason; every listed function's bytes are read through
-/// [`ElfInfo::file_slice`].
+/// One conservative x86-64 function-prologue pattern for stripped binaries.
+/// The set is deliberately small: every pattern here is a byte sequence
+/// mainstream compilers emit at a function entry and essentially never as
+/// mid-function code at a 16-byte boundary. Future tuning adds or removes
+/// entries here and re-runs `compid functions <bin> --measure` - nothing
+/// else in the scanner needs to change.
+struct ProloguePattern {
+    /// Leading bytes the candidate must match exactly.
+    bytes: &'static [u8],
+    /// When true, a candidate is accepted only at a 16-byte-aligned virtual
+    /// address - the alignment every mainstream linker gives function
+    /// starts. Non-aligned prologue-shaped bytes are overwhelmingly
+    /// mid-instruction coincidences.
+    aligned_only: bool,
+    /// When true the match is an `endbr64` site: Intel CET places those at
+    /// function entries (and indirect jump targets) with no alignment
+    /// guarantee beyond the instruction itself, so the site is accepted at
+    /// any alignment (with a followup) and, at a 16-byte-aligned site,
+    /// without one; PLT stub shapes are excluded either way.
+    endbr64: bool,
+    /// When non-empty, the match counts only when one of these byte
+    /// sequences appears within [`ENDBR64_FOLLOWUP_WINDOW`] bytes after
+    /// the match - the paired-instruction shape a lone hit cannot
+    /// distinguish from mid-function code.
+    followups: &'static [&'static [u8]],
+}
+
+/// `endbr64` (`f3 0f 1e fa`) alone also marks every indirect jump target,
+/// so an UNALIGNED `endbr64` site counts as a function start only when one
+/// of these frame-setup or callee-saved-push sequences appears within the
+/// next [`ENDBR64_FOLLOWUP_WINDOW`] bytes. A 16-byte-aligned `endbr64`
+/// site needs no followup: mainstream linkers align function entries, and
+/// the glibc -O2 idiom (`endbr64; mov rax, rdi; ...`) has no frame setup
+/// at all. What the alignment gate cannot exclude are PLT stubs, which are
+/// also 16-byte-aligned `endbr64` sites - [`is_plt_stub_after_endbr64`]
+/// rejects those.
+const ENDBR64_FOLLOWUPS: &[&[u8]] = &[
+    b"\x55",         // push rbp
+    b"\x53",         // push rbx
+    b"\x41\x57",     // push r15
+    b"\x41\x56",     // push r14
+    b"\x41\x55",     // push r13
+    b"\x41\x54",     // push r12
+    b"\x48\x89\xe5", // mov rbp, rsp
+    b"\x48\x83\xec", // sub rsp, imm8
+    b"\x48\x81\xec", // sub rsp, imm32
+];
+
+/// How many bytes after an `endbr64` match a frame-setup sequence may sit.
+const ENDBR64_FOLLOWUP_WINDOW: u64 = 8;
+
+/// Mnemonics whose instruction ends a straight-line decode (the next byte
+/// belongs to a different function or a jump target, never a fallthrough).
+const TERMINATORS: &[&str] = &["ret", "retf", "jmp", "ud2", "hlt", "int3"];
+
+/// The bodies a PLT stub shows right after its `endbr64`:
+/// `jmp *offset(%rip)` (`ff 25 <rel32>`), its `bnd`-prefixed form
+/// (`f2 ff 25 <rel32>`), and the index-push form (`push imm32; jmp rel32`).
+const PLT_STUB_AFTER: &[&[u8]] = &[b"\xff\x25", b"\xf2\xff\x25", b"\x68"];
+
+/// The bodies an index-less PLT stub starts with (`push *GOT(%rip)` first
+/// entry, plain and `bnd` `jmp *GOT`), checked at a section start.
+const PLT_STUB_LEAD: &[&[u8]] = &[b"\xff\x35", b"\xff\x25", b"\xf2\xff\x35", b"\xf2\xff\x25"];
+
+/// The pattern set. `push rbp; mov rbp, rsp` covers frame-pointer builds
+/// (every -O0/-O1 function, -O2 functions that keep a frame); `endbr64`
+/// covers CET-enabled builds, where every function entry is marked;
+/// `push rbx; mov rbx, rdi` is the canonical non-frame-pointer prologue
+/// that spills the first argument into a callee-saved register; the
+/// paired-`lea` shape is the crt stub that carries no endbr64 and no
+/// frame setup.
+const PROLOGUE_PATTERNS: &[ProloguePattern] = &[
+    ProloguePattern {
+        // push rbp; mov rbp, rsp
+        bytes: b"\x55\x48\x89\xe5",
+        aligned_only: true,
+        endbr64: false,
+        followups: &[],
+    },
+    ProloguePattern {
+        // endbr64 (CET function entries and indirect jump targets). At a
+        // 16-byte-aligned site accepted as-is; unaligned, only with a
+        // frame-setup followup - see ENDBR64_FOLLOWUPS.
+        bytes: b"\xf3\x0f\x1e\xfa",
+        aligned_only: false,
+        endbr64: true,
+        followups: ENDBR64_FOLLOWUPS,
+    },
+    ProloguePattern {
+        // push rbx; mov rbx, rdi
+        bytes: b"\x53\x48\x89\xfb",
+        aligned_only: true,
+        endbr64: false,
+        followups: &[],
+    },
+    ProloguePattern {
+        // lea disp32(%rip), rdi followed by a second rip-relative lea -
+        // the deregister_tm_clones/register_tm_clones pair. Aligned-only,
+        // and the second lea is what separates the stub from ordinary
+        // mid-function argument setup.
+        bytes: b"\x48\x8d\x3d",
+        aligned_only: true,
+        endbr64: false,
+        followups: &[b"\x48\x8d"],
+    },
+];
+
+/// Smallest gap at which two candidates are always kept as separate
+/// functions; within this gap, [`merges_into`] decides by decode - an
+/// earlier candidate whose code flows into the later one merges it, a
+/// terminator (a thunk's `jmp`) keeps them apart.
+const CANDIDATE_MIN_GAP: u64 = 16;
+
+/// Smallest function the scan reports; a candidate with fewer bytes than
+/// this before the next candidate (or the section end) is dropped.
+const FUNCTION_MIN_SIZE: u64 = 16;
+
+/// How many bytes of straight-line decoding a candidate must survive. A
+/// final instruction may run past the mark - real instructions do not
+/// respect the window - but a decode error inside it disqualifies the
+/// candidate.
+const PROLOGUE_DECODE_DEPTH: usize = 16;
+
+/// Alignment mainstream linkers give function starts.
+const FUNCTION_ALIGNMENT: u64 = 16;
+
+/// True when instructions decode without error from the start of `bytes`
+/// through the first [`PROLOGUE_DECODE_DEPTH`] bytes (a trailing
+/// instruction may overrun the mark).
+fn prologue_decodes(decoder: &InstDecoder, bytes: &[u8]) -> bool {
+    let mut off = 0usize;
+    while off < PROLOGUE_DECODE_DEPTH.min(bytes.len()) {
+        match decoder.decode_slice(&bytes[off..]) {
+            Ok(inst) => {
+                let len = LengthedInstruction::len(&inst).to_const() as usize;
+                if len == 0 {
+                    return false;
+                }
+                off += len;
+            }
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// True when one of `followups` appears within the
+/// [`ENDBR64_FOLLOWUP_WINDOW`] bytes after a pattern match.
+fn endbr64_has_followup(after: &[u8], followups: &[&[u8]]) -> bool {
+    let window_len = (ENDBR64_FOLLOWUP_WINDOW as usize).min(after.len());
+    let window = &after[..window_len];
+    followups
+        .iter()
+        .any(|followup| window.windows(followup.len()).any(|w| w == *followup))
+}
+
+/// True when the bytes right after an `endbr64` open with a PLT stub body:
+/// a `jmp *GOT(%rip)` (plain or `bnd`), or the index-push form
+/// `push imm32; jmp rel32`.
+fn is_plt_stub_after_endbr64(after: &[u8]) -> bool {
+    for shape in PLT_STUB_AFTER {
+        if !after.starts_with(shape) {
+            continue;
+        }
+        match shape[0] {
+            0x68 => {
+                if after.len() >= 6 && after[5] == 0xe9 {
+                    return true;
+                }
+            }
+            _ => return true,
+        }
+    }
+    false
+}
+
+/// True when a section's first bytes open with an index-less PLT stub
+/// (`push *GOT` or `jmp *GOT`, plain or `bnd`).
+fn is_plt_stub_lead(bytes: &[u8]) -> bool {
+    PLT_STUB_LEAD.iter().any(|shape| bytes.starts_with(shape))
+}
+
+/// True when a later candidate `b` is part of the code the earlier
+/// candidate `a` already claimed: either `b` sits inside one of `a`'s
+/// instructions, or `a`'s straight-line decode reaches `b` on an
+/// instruction boundary without a terminator in between (the CET
+/// double-mark of one entry). A terminator (`ret`, `jmp`, ...) ending
+/// exactly at `b` means `b` starts its own code - the linker-thunk case,
+/// where an `endbr64; jmp` stub sits 9 bytes before the function it
+/// tail-calls. A decode error before `b` falls back to the 16-byte gap
+/// rule.
+fn merges_into(bytes: &[u8], a: u64, b: u64) -> bool {
+    if b - a >= CANDIDATE_MIN_GAP {
+        // Farther apart than the gap: only a mid-instruction overlap
+        // justifies merging, and a 15-byte instruction cannot reach that
+        // far, so these are always distinct.
+        return false;
+    }
+    // Within the gap window: decide by decode, or merge on doubt.
+    let mut off = a as usize;
+    let end = b as usize;
+    for _ in 0..32 {
+        if off >= end {
+            return true;
+        }
+        match InstDecoder::default().decode_slice(&bytes[off..]) {
+            Ok(inst) => {
+                let len = LengthedInstruction::len(&inst).to_const() as usize;
+                if len == 0 {
+                    return true;
+                }
+                if off + len > end {
+                    return true; // b is inside an instruction of a
+                }
+                if off + len == end {
+                    let m = inst.opcode().to_string();
+                    return !TERMINATORS.contains(&m.as_str());
+                }
+                off += len;
+            }
+            Err(_) => return true, // cannot tell: keep the gap rule
+        }
+    }
+    true
+}
+
+/// Scan one executable byte range for candidate function starts. Returns
+/// `(offset, size)` pairs into `bytes`, ordered by offset: `offset` is
+/// where the function starts, `size` runs to the next candidate or the end
+/// of the range. Offset 0 is always a candidate (when it disassembles and
+/// is not a PLT stub shape) - the linker places a function at a section
+/// start by construction. Candidates that are part of an earlier
+/// candidate's code (see [`merges_into`]) merge into it; candidates whose
+/// first [`PROLOGUE_DECODE_DEPTH`] bytes fail to disassemble cleanly, or
+/// whose slice is shorter than [`FUNCTION_MIN_SIZE`], are dropped.
+/// `base_addr` is the virtual address of `bytes[0]` and drives the
+/// alignment gate.
+pub fn scan_prologue_candidates(bytes: &[u8], base_addr: u64) -> Vec<(u64, u64)> {
+    // Raw pattern hits, in file order.
+    let mut hits: Vec<u64> = Vec::new();
+    for pattern in PROLOGUE_PATTERNS {
+        let plen = pattern.bytes.len();
+        for i in 0..bytes.len().saturating_sub(plen - 1) {
+            if !bytes[i..].starts_with(pattern.bytes) {
+                continue;
+            }
+            let aligned = (base_addr + i as u64).is_multiple_of(FUNCTION_ALIGNMENT);
+            let after = &bytes[i + plen..];
+            if pattern.endbr64 {
+                if is_plt_stub_after_endbr64(after) {
+                    // endbr64; jmp *GOT(%rip): a PLT stub, not an entry.
+                    continue;
+                }
+                if !aligned && !endbr64_has_followup(after, ENDBR64_FOLLOWUPS) {
+                    continue;
+                }
+            } else {
+                if pattern.aligned_only && !aligned {
+                    continue;
+                }
+                if !pattern.followups.is_empty() && !endbr64_has_followup(after, pattern.followups)
+                {
+                    continue;
+                }
+            }
+            hits.push(i as u64);
+        }
+    }
+    // The first byte of an executable section is a function start by
+    // construction (.init, .fini, .text.unlikely all open with one) unless
+    // the section is a PLT.
+    let after_lead = &bytes[4.min(bytes.len())..];
+    if !bytes.is_empty() && !is_plt_stub_lead(bytes) && !is_plt_stub_after_endbr64(after_lead) {
+        hits.push(0);
+    }
+    hits.sort_unstable();
+    hits.dedup();
+
+    // Merge candidates that are part of an earlier candidate's code, and
+    // keep only candidates whose first PROLOGUE_DECODE_DEPTH bytes
+    // disassemble cleanly.
+    let decoder = InstDecoder::default();
+    let mut starts: Vec<u64> = Vec::new();
+    for h in hits {
+        if let Some(&last) = starts.last() {
+            if merges_into(bytes, last, h) {
+                continue;
+            }
+        }
+        if prologue_decodes(&decoder, &bytes[h as usize..]) {
+            starts.push(h);
+        }
+    }
+
+    // Each surviving function runs to the next candidate (or the range
+    // end) and must hold at least FUNCTION_MIN_SIZE bytes.
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    for (n, &start) in starts.iter().enumerate() {
+        let next = starts.get(n + 1).copied().unwrap_or(bytes.len() as u64);
+        let end = next.min(bytes.len() as u64);
+        if end - start < FUNCTION_MIN_SIZE {
+            continue;
+        }
+        out.push((start, end - start));
+    }
+    out
+}
+
+/// Function boundaries for a stripped x86-64 ELF: run
+/// [`scan_prologue_candidates`] over every executable, byte-backed section
+/// and name each candidate `func_<hex virtual address>`. Returns functions
+/// ordered by address. Empty when the binary exposes no executable section
+/// bytes or the scan finds nothing.
+pub fn heuristic_functions(info: &ElfInfo) -> Vec<FunctionSymbol> {
+    let mut out: Vec<FunctionSymbol> = Vec::new();
+    for section in &info.sections {
+        if !section.executable || section.no_bits || section.size == 0 {
+            continue;
+        }
+        let bytes = info.file_slice(section.offset, section.size);
+        if bytes.is_empty() {
+            continue;
+        }
+        for (start, size) in scan_prologue_candidates(&bytes, section.addr) {
+            let addr = section.addr + start;
+            out.push(FunctionSymbol {
+                name: format!("func_{addr:x}"),
+                addr,
+                size,
+                file_offset: section.offset + start as usize,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.addr.cmp(&b.addr).then_with(|| a.name.cmp(&b.name)));
+    out
+}
+
+/// Per-function extraction from parsed ELF material. An unstripped ELF
+/// lists its symbol-table functions. A stripped x86-64 ELF falls back to
+/// [`heuristic_functions`] (with `source: FunctionSource::Heuristic`);
+/// when even the heuristic finds nothing, the list stays empty with an
+/// explicit reason. A stripped non-x86-64 ELF keeps its "needs an
+/// unstripped ELF" reason - boundaries are never guessed for architectures
+/// the scanner does not read. Every listed function's bytes are read
+/// through [`ElfInfo::file_slice`].
 pub fn extract_elf(info: &ElfInfo) -> FunctionsExtraction {
     let labels = Labels::from_elf(info);
+    let build_id = info.build_id.clone();
+
+    if info.functions.is_empty() && !info.has_symtab && info.labels.arch == "x86-64" {
+        // Stripped x86-64: the prologue heuristic owns the boundaries.
+        let functions = heuristic_functions(info)
+            .into_iter()
+            .map(|fs| FunctionFeatures {
+                name: fs.name.clone(),
+                addr: fs.addr,
+                size: fs.size,
+                features: function_features(&info.file_slice(fs.file_offset, fs.size)),
+            })
+            .collect::<Vec<_>>();
+        let reason = functions.is_empty().then(|| {
+            "no symbol table: binary looks stripped, and the prologue \
+             heuristic found no candidate function starts in the executable \
+             sections"
+                .to_string()
+        });
+        return FunctionsExtraction {
+            build_id,
+            labels,
+            source: FunctionSource::Heuristic,
+            functions,
+            reason,
+        };
+    }
+
     let functions = if info.functions.is_empty() {
         Vec::new()
     } else {
@@ -148,8 +535,9 @@ pub fn extract_elf(info: &ElfInfo) -> FunctionsExtraction {
         None
     };
     FunctionsExtraction {
-        build_id: info.build_id.clone(),
+        build_id,
         labels,
+        source: FunctionSource::SymbolTable,
         functions,
         reason,
     }
@@ -161,6 +549,7 @@ pub fn extract_pe(info: &PeInfo) -> FunctionsExtraction {
     FunctionsExtraction {
         build_id: info.build_id.clone(),
         labels: Labels::from_pe(info),
+        source: FunctionSource::SymbolTable,
         functions: Vec::new(),
         reason: Some(
             "PE function extraction is not implemented yet; function \
@@ -170,11 +559,111 @@ pub fn extract_pe(info: &PeInfo) -> FunctionsExtraction {
     }
 }
 
+/// How many bytes a heuristic start may sit from a symbol-table start and
+/// still count as the same function in [`measure_boundaries`].
+pub const MEASURE_TOLERANCE: u64 = 8;
+
+/// Aggregate result of measuring the prologue heuristic against
+/// symbol-table ground truth on one unstripped binary.
+#[derive(Debug, Clone, Serialize)]
+pub struct BoundaryMetrics {
+    /// Distinct symbol-table function starts (ground truth).
+    pub symbol_starts: usize,
+    /// Distinct heuristic starts the scan produced.
+    pub heuristic_starts: usize,
+    /// Heuristic starts with a symbol start within `tolerance` bytes.
+    pub matched: usize,
+    /// The match tolerance in bytes.
+    pub tolerance: u64,
+    /// `matched / heuristic_starts` (0.0 when the scan found nothing).
+    pub precision: f64,
+    /// Share of symbol starts the scan found within `tolerance`.
+    pub recall: f64,
+    /// Harmonic mean of precision and recall.
+    pub f1: f64,
+}
+
+/// Count elements of `a` with some element of `b` within `tol` bytes.
+/// Both slices must be sorted; a `b` element may back several `a`
+/// elements (with tolerance 8, two `a` starts 16 apart can both reach the
+/// same `b`), which is the honest reading of "start within tolerance".
+fn count_within(a: &[u64], b: &[u64], tol: u64) -> usize {
+    let mut j = 0usize;
+    let mut n = 0usize;
+    for &x in a {
+        while j < b.len() && b[j] < x.saturating_sub(tol) {
+            j += 1;
+        }
+        if j < b.len() && b[j] <= x.saturating_add(tol) {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Measure the prologue heuristic against symbol-table ground truth on one
+/// parsed ELF: precision (share of heuristic starts that sit within
+/// [`MEASURE_TOLERANCE`] bytes of a symbol start), recall (share of symbol
+/// starts found), and their F1. Errors for a non-x86-64 ELF or one without
+/// symbol-table ground truth (a stripped binary has nothing to measure
+/// against).
+pub fn measure_boundaries(info: &ElfInfo) -> Result<BoundaryMetrics> {
+    if info.labels.arch != "x86-64" {
+        bail!(
+            "boundary measurement is implemented for x86-64 ELF only (this binary is {})",
+            info.labels.arch
+        );
+    }
+    if info.function_starts.is_empty() {
+        bail!(
+            "no symbol-table ground truth to measure against: pass an \
+             unstripped ELF with STT_FUNC symbols (a stripped binary has no \
+             boundary truth)"
+        );
+    }
+
+    let truth: &[u64] = &info.function_starts;
+    let mut heur: Vec<u64> = heuristic_functions(info)
+        .into_iter()
+        .map(|f| f.addr)
+        .collect();
+    heur.sort_unstable();
+    heur.dedup();
+
+    let matched_heur = count_within(&heur, truth, MEASURE_TOLERANCE);
+    let matched_truth = count_within(truth, &heur, MEASURE_TOLERANCE);
+    let precision = if heur.is_empty() {
+        0.0
+    } else {
+        matched_heur as f64 / heur.len() as f64
+    };
+    let recall = if truth.is_empty() {
+        0.0
+    } else {
+        matched_truth as f64 / truth.len() as f64
+    };
+    let f1 = if precision + recall > 0.0 {
+        2.0 * precision * recall / (precision + recall)
+    } else {
+        0.0
+    };
+    Ok(BoundaryMetrics {
+        symbol_starts: truth.len(),
+        heuristic_starts: heur.len(),
+        matched: matched_heur,
+        tolerance: MEASURE_TOLERANCE,
+        precision,
+        recall,
+        f1,
+    })
+}
+
 /// Placeholder for Mach-O: same situation as PE.
 pub fn extract_macho(info: &MachoInfo) -> FunctionsExtraction {
     FunctionsExtraction {
         build_id: info.build_id.clone(),
         labels: Labels::from_macho(info),
+        source: FunctionSource::SymbolTable,
         functions: Vec::new(),
         reason: Some(
             "Mach-O function extraction is not implemented yet; function \
@@ -232,5 +721,192 @@ mod tests {
         assert!(!f.contains_key("ng:c3"), "no 3-gram fits in one byte");
         assert_eq!(f.get("meta:windows"), Some(&0));
         assert_eq!(f.get("fn:0"), Some(&1));
+    }
+
+    // ---- prologue scanner, on synthetic .text blobs ----
+
+    /// 16 bytes of plausible filler: `mov eax, 0; nop`-shaped bytes that
+    /// decode cleanly and match no prologue pattern.
+    fn filler() -> [u8; 16] {
+        [
+            0xb8, 0x00, 0x00, 0x00, 0x00, // mov eax, 0
+            0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // nops
+        ]
+    }
+
+    #[test]
+    fn finds_an_aligned_frame_pointer_prologue() {
+        // 0x06 (push es) is invalid in 64-bit mode, so the blob's first
+        // byte is not a section-start candidate; the prologue at offset 16
+        // is the only hit.
+        let mut text = vec![0x06];
+        text.extend_from_slice(&filler()[1..]);
+        text.extend_from_slice(&[0x55, 0x48, 0x89, 0xe5]); // push rbp; mov rbp,rsp
+        text.extend_from_slice(&[0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3]); // mov eax,0x2a; ret
+        text.resize(48, 0x90);
+        let found = scan_prologue_candidates(&text, 0);
+        assert_eq!(
+            found,
+            vec![(16, 32)],
+            "one candidate at offset 16 (aligned)"
+        );
+    }
+
+    #[test]
+    fn section_start_is_always_a_candidate() {
+        // The linker places a function at an executable section start even
+        // when the first bytes match no prologue pattern.
+        let mut text = filler().to_vec();
+        text.extend_from_slice(&[0x48, 0x8d, 0x3d, 0x11, 0x2b, 0x00, 0x00]); // lea rip+0x2b11,rdi
+        text.resize(48, 0x90);
+        assert_eq!(scan_prologue_candidates(&text, 0), vec![(0, 48)]);
+    }
+
+    #[test]
+    fn rejects_a_frame_pointer_prologue_off_alignment() {
+        // Same bytes, but the prologue sits at offset 1: no candidates
+        // anywhere (0x06 kills the section start, the prologue is
+        // misaligned).
+        let mut text = vec![0x06, 0x55, 0x48, 0x89, 0xe5];
+        text.extend_from_slice(&[0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3]);
+        text.resize(24, 0x90);
+        assert!(
+            scan_prologue_candidates(&text, 0).is_empty(),
+            "misaligned push rbp/mov rbp,rsp is not a candidate"
+        );
+    }
+
+    #[test]
+    fn finds_an_endbr64_site_at_any_alignment() {
+        // endbr64 at a deliberately unaligned offset, then `push rbp`
+        // 4 bytes later (within the 8-byte followup window).
+        let mut text = vec![0x06];
+        text.extend_from_slice(&[0xf3, 0x0f, 0x1e, 0xfa]); // endbr64 @1
+        text.extend_from_slice(&[0x55]); // push rbp @5
+        text.extend_from_slice(&[0x48, 0x89, 0xe5]); // mov rbp,rsp
+        text.extend_from_slice(&[0x5d, 0xc3]); // pop rbp; ret
+        text.resize(32, 0x90);
+        let found = scan_prologue_candidates(&text, 0);
+        assert_eq!(found, vec![(1, 31)], "endbr64 site accepted unaligned");
+    }
+
+    #[test]
+    fn endbr64_alignment_and_followup_rules() {
+        // Aligned endbr64 with no frame setup (the glibc -O2 idiom) is a
+        // candidate; the same bytes off alignment (and off the section
+        // start) are not.
+        let mut text = vec![0xf3, 0x0f, 0x1e, 0xfa, 0x48, 0x89, 0xf8]; // endbr64; mov rax,rdi
+        text.extend_from_slice(&[0x48, 0x01, 0xf8, 0xc3]); // add rax,rdi; ret
+        text.resize(32, 0x90);
+        assert_eq!(
+            scan_prologue_candidates(&text, 0),
+            vec![(0, 32)],
+            "aligned endbr64 without frame setup is an entry"
+        );
+        let mut unaligned = vec![0x06];
+        unaligned.extend_from_slice(&text[..text.len() - 1]);
+        assert!(
+            scan_prologue_candidates(&unaligned, 1).is_empty(),
+            "unaligned endbr64 without frame setup is not a candidate"
+        );
+    }
+
+    #[test]
+    fn rejects_a_plt_stub() {
+        // endbr64; jmp *GOT(%rip) at a 16-aligned site is a PLT stub, not
+        // a function entry - neither as a pattern hit nor as a section
+        // start.
+        let mut text = vec![0xf3, 0x0f, 0x1e, 0xfa, 0xff, 0x25, 0x02, 0x00];
+        text.resize(32, 0x90);
+        assert!(
+            scan_prologue_candidates(&text, 0).is_empty(),
+            "PLT stub shape must not become a function"
+        );
+        let mut bnd = vec![0xf3, 0x0f, 0x1e, 0xfa, 0xf2, 0xff, 0x25, 0x02, 0x00];
+        bnd.resize(32, 0x90);
+        assert!(
+            scan_prologue_candidates(&bnd, 0).is_empty(),
+            "bnd jmp form too"
+        );
+    }
+
+    #[test]
+    fn finds_a_push_rbx_prologue_only_aligned() {
+        let prologue = [0x53, 0x48, 0x89, 0xfb]; // push rbx; mov rbx,rdi
+        let mut aligned = vec![0x06];
+        aligned.extend_from_slice(&filler()[1..]);
+        aligned.extend_from_slice(&prologue);
+        aligned.resize(48, 0x90);
+        assert_eq!(
+            scan_prologue_candidates(&aligned, 0),
+            vec![(16, 32)],
+            "aligned push-rbx prologue found"
+        );
+
+        let mut unaligned = vec![0x06, 0x90];
+        unaligned.extend_from_slice(&prologue);
+        unaligned.resize(24, 0x90);
+        assert!(
+            scan_prologue_candidates(&unaligned, 0).is_empty(),
+            "push-rbx prologue is aligned-only"
+        );
+    }
+
+    #[test]
+    fn merges_candidates_closer_than_sixteen_bytes() {
+        // A frame-pointer prologue at offset 16 and an endbr64 at 20 (the
+        // CET form of the same entry): one function, at the earlier start.
+        let mut text = vec![0x06];
+        text.extend_from_slice(&filler()[1..]);
+        text.extend_from_slice(&[0x55, 0x48, 0x89, 0xe5]); // @16
+        text.extend_from_slice(&[0xf3, 0x0f, 0x1e, 0xfa]); // @20 endbr64
+        text.extend_from_slice(&[0x48, 0x83, 0xec, 0x08]); // sub rsp,8
+        text.resize(64, 0x90);
+        let found = scan_prologue_candidates(&text, 0);
+        assert_eq!(found, vec![(16, 48)]);
+    }
+
+    #[test]
+    fn drops_a_candidate_that_fails_to_decode() {
+        // The prologue bytes are present, but 0xff 0xff (an invalid FF /7
+        // opcode) inside the first 16 bytes kills the candidate.
+        let mut text = vec![0x06];
+        text.extend_from_slice(&filler()[1..]);
+        text.extend_from_slice(&[0x55, 0x48, 0x89, 0xe5]);
+        text.extend_from_slice(&[0xff; 12]);
+        assert!(scan_prologue_candidates(&text, 0).is_empty());
+    }
+
+    #[test]
+    fn drops_a_candidate_with_under_sixteen_bytes_to_the_end() {
+        let mut text = vec![0x06];
+        text.extend_from_slice(&filler()[1..]);
+        text.extend_from_slice(&[0x55, 0x48, 0x89, 0xe5, 0xc3, 0x90]);
+        // 22 bytes total: the candidate at 16 holds only 6 bytes.
+        assert!(scan_prologue_candidates(&text, 0).is_empty());
+    }
+
+    #[test]
+    fn consecutive_candidates_split_the_range() {
+        // Two aligned frame-pointer functions back to back: each runs to
+        // the next candidate.
+        let mut text = vec![0x06];
+        text.extend_from_slice(&filler()[1..]);
+        text.extend_from_slice(&[0x55, 0x48, 0x89, 0xe5]);
+        text.resize(48, 0x90);
+        text.extend_from_slice(&[0x55, 0x48, 0x89, 0xe5]); // @48
+        text.resize(80, 0x90);
+        let found = scan_prologue_candidates(&text, 0);
+        assert_eq!(found, vec![(16, 32), (48, 32)]);
+    }
+
+    #[test]
+    fn measure_counts_matches_within_tolerance() {
+        let truth = [100u64, 200, 1000];
+        let heur = [104u64, 500, 995, 1100];
+        // 104 ~ 100 (delta 4), 995 ~ 1000 (delta 5); 500 and 1100 unmatched.
+        assert_eq!(count_within(&heur, &truth, 8), 2);
+        assert_eq!(count_within(&truth, &heur, 8), 2);
+        assert_eq!(count_within(&heur, &truth, 0), 0);
     }
 }

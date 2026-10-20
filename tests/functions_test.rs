@@ -1,9 +1,12 @@
 //! Function-level extraction tests against synthetic ELFs built byte-by-byte:
 //! symbol-table enumeration (linked-executable and relocatable-object
-//! layouts), feature scoping to one function's bytes, and the model reader's
-//! acceptance of a functions.json payload.
+//! layouts), the stripped-binary prologue heuristic (synthetic .text blobs
+//! and a real fixture stripped at test time), feature scoping to one
+//! function's bytes, and the model reader's acceptance of a functions.json
+//! payload.
 
 use compid::{elfinfo, functions, model};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Two known 64-byte functions back to back. `alpha` opens with the
@@ -303,13 +306,12 @@ fn function_features_scope_to_the_function_bytes_only() {
     }
 }
 
-/// A stripped ELF (no symtab section) yields an empty list with the reason,
-/// and no features are manufactured.
-#[test]
-fn stripped_elf_reports_a_reason_instead_of_functions() {
-    // Reuse the four-section fixture shape: .text plus .comment only.
+/// A minimal stripped ELF (no symtab): ELF header, a `.text` section
+/// mapped at 0x401000, a `.comment` section, and the section-name string
+/// table. `machine` picks the architecture (62 = EM_X86_64, 183 =
+/// EM_AARCH64).
+fn stripped_elf(text: &[u8], machine: u16) -> Vec<u8> {
     let shstrtab: &[u8] = b"\0.text\0.comment\0.shstrtab\0";
-    let text = two_functions();
     let comment: &[u8] = b"x\0";
     let text_off = 64u64;
     let comment_off = text_off + text.len() as u64;
@@ -318,20 +320,21 @@ fn stripped_elf_reports_a_reason_instead_of_functions() {
 
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    out.extend_from_slice(&2u16.to_le_bytes());
-    out.extend_from_slice(&62u16.to_le_bytes());
-    out.extend_from_slice(&1u32.to_le_bytes());
-    out.extend_from_slice(&0u64.to_le_bytes());
-    out.extend_from_slice(&0u64.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    out.extend_from_slice(&machine.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes()); // e_version
+    out.extend_from_slice(&0u64.to_le_bytes()); // e_entry
+    out.extend_from_slice(&0u64.to_le_bytes()); // e_phoff
     out.extend_from_slice(&shoff.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes());
-    out.extend_from_slice(&64u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&64u16.to_le_bytes());
-    out.extend_from_slice(&4u16.to_le_bytes());
-    out.extend_from_slice(&3u16.to_le_bytes());
-    out.extend_from_slice(&text);
+    out.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+    out.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_phentsize
+    out.extend_from_slice(&0u16.to_le_bytes()); // e_phnum
+    out.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+    out.extend_from_slice(&4u16.to_le_bytes()); // e_shnum
+    out.extend_from_slice(&3u16.to_le_bytes()); // e_shstrndx
+    assert_eq!(out.len(), 64);
+    out.extend_from_slice(text);
     out.extend_from_slice(comment);
     out.extend_from_slice(shstrtab);
     // null, .text, .comment, .shstrtab
@@ -339,8 +342,8 @@ fn stripped_elf_reports_a_reason_instead_of_functions() {
     section_header(
         &mut out,
         1,
-        1,
-        0x6,
+        1,   // SHT_PROGBITS
+        0x6, // ALLOC | EXECINSTR
         0x401000,
         text_off,
         text.len() as u64,
@@ -353,7 +356,7 @@ fn stripped_elf_reports_a_reason_instead_of_functions() {
         &mut out,
         7,
         1,
-        0x30,
+        0x30, // ALLOC | WRITE
         0,
         comment_off,
         comment.len() as u64,
@@ -375,17 +378,195 @@ fn stripped_elf_reports_a_reason_instead_of_functions() {
         1,
         0,
     );
+    out
+}
 
-    let info = elfinfo::parse(Arc::new(out)).expect("parses");
+/// A stripped x86-64 ELF falls back to the prologue heuristic: both
+/// prologue-marked functions are found with synthesized names, correct
+/// boundaries, and strictly scoped features.
+#[test]
+fn stripped_elf_yields_heuristic_functions() {
+    let mut text: Vec<u8> = Vec::new();
+    // alpha @0x401000 (16-aligned): push rbp; mov rbp,rsp; mov eax,0x2a; ...
+    text.extend_from_slice(&[
+        0x55, 0x48, 0x89, 0xe5, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0x5d, 0xc3,
+    ]);
+    while text.len() < 64 {
+        text.push(0x90);
+    }
+    // beta @0x401040 (16-aligned): endbr64; push rbp; mov rbp,rsp; mov eax,0x1f; ...
+    text.extend_from_slice(&[
+        0xf3, 0x0f, 0x1e, 0xfa, 0x55, 0x48, 0x89, 0xe5, 0xb8, 0x1f, 0x00, 0x00, 0x00, 0x5d, 0xc3,
+    ]);
+    while text.len() < 128 {
+        text.push(0x90);
+    }
+
+    let info = elfinfo::parse(Arc::new(stripped_elf(&text, 62))).expect("parses");
     assert!(!info.has_symtab);
-    assert!(info.functions.is_empty());
+    assert!(info.functions.is_empty(), "no symbol table, no symbols");
     let ex = functions::extract_elf(&info);
+    assert_eq!(ex.source, functions::FunctionSource::Heuristic);
+    assert!(ex.reason.is_none(), "reason: {:?}", ex.reason);
+    assert_eq!(ex.functions.len(), 2, "got: {:?}", ex.functions);
+
+    let alpha = &ex.functions[0];
+    let beta = &ex.functions[1];
+    assert_eq!(alpha.name, "func_401000");
+    assert_eq!(alpha.addr, 0x401000);
+    assert_eq!(alpha.size, 64);
+    assert_eq!(beta.name, "func_401040");
+    assert_eq!(beta.addr, 0x401040);
+    assert_eq!(beta.size, 64);
+
+    // Feature scoping survives the heuristic: 62 3-grams per 64-byte
+    // function, no boundary straddling, no cross-leak.
+    for f in [alpha, beta] {
+        let total: u64 = f
+            .features
+            .iter()
+            .filter(|(k, _)| k.starts_with("ng:"))
+            .map(|(_, v)| v)
+            .sum();
+        assert_eq!(total, 62, "{}: n-gram total = {total}", f.name);
+    }
+    assert_eq!(alpha.features.get("cn:2a"), Some(&1));
+    assert_eq!(beta.features.get("cn:1f"), Some(&1));
+    assert!(!alpha.features.contains_key("cn:1f"));
+    assert!(!beta.features.contains_key("cn:2a"));
+    // beta's CET prologue is beta's own n-gram, never alpha's.
+    assert_eq!(beta.features.get("ng:f30f1e"), Some(&1));
+    assert!(!alpha.features.contains_key("ng:f30f1e"));
+}
+
+/// A stripped ELF whose executable bytes hold no prologue at all yields an
+/// empty list with an explicit heuristic-shaped reason.
+#[test]
+fn stripped_elf_without_prologues_reports_a_reason() {
+    // `push es` is invalid in 64-bit mode, so not even the section-start
+    // candidate survives the decode check.
+    let text = vec![0x06; 24];
+    let info = elfinfo::parse(Arc::new(stripped_elf(&text, 62))).expect("parses");
+    let ex = functions::extract_elf(&info);
+    assert_eq!(ex.source, functions::FunctionSource::Heuristic);
     assert!(ex.functions.is_empty());
     let reason = ex.reason.expect("reason present");
     assert!(
-        reason.contains("stripped"),
-        "reason mentions stripped: {reason}"
+        reason.contains("heuristic found no candidate"),
+        "reason: {reason}"
     );
+}
+
+/// A stripped non-x86-64 ELF keeps the "needs an unstripped ELF" reason -
+/// boundaries are never guessed for architectures the scanner cannot read.
+#[test]
+fn stripped_non_x86_64_elf_keeps_the_symbol_table_requirement() {
+    let info = elfinfo::parse(Arc::new(stripped_elf(&two_functions(), 183))).expect("parses"); // EM_AARCH64
+    assert_eq!(info.labels.arch, "aarch64");
+    let ex = functions::extract_elf(&info);
+    assert_eq!(ex.source, functions::FunctionSource::SymbolTable);
+    assert!(ex.functions.is_empty());
+    let reason = ex.reason.expect("reason present");
+    assert!(
+        reason.contains("stripped") && reason.contains("unstripped ELF"),
+        "reason: {reason}"
+    );
+}
+
+/// The prologue heuristic against a real binary: strip a copy of the
+/// committed unstripped fixture at test time and compare the heuristic's
+/// starts with the original's symbol-table starts. Skipped when `strip` is
+/// unavailable or the fixture is absent.
+#[test]
+fn stripped_fixture_heuristic_matches_symbol_ground_truth() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let unstripped_path = dir.join("gcc13_O2_x86_64_pie_dynamic");
+    if !unstripped_path.exists() {
+        eprintln!("skipping: fixture {unstripped_path:?} not present");
+        return;
+    }
+    if std::process::Command::new("strip")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: strip tool not available");
+        return;
+    }
+
+    let tmp = std::env::temp_dir().join(format!(
+        "compid_stripped_fixture_{}_{}.elf",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::copy(&unstripped_path, &tmp).expect("copy fixture");
+    let stripped_ok = std::process::Command::new("strip")
+        .arg(&tmp)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(stripped_ok, "strip ran");
+
+        let stripped_info = elfinfo::load(&tmp).expect("stripped copy parses");
+        assert!(!stripped_info.has_symtab);
+        let heur = functions::heuristic_functions(&stripped_info);
+        assert!(
+            !heur.is_empty(),
+            "heuristic found functions in a real binary"
+        );
+        for f in &heur {
+            assert!(f.name.starts_with("func_"), "synthesized name: {}", f.name);
+            assert!(f.size >= 16, "minimum size holds: {}", f.name);
+        }
+        for pair in heur.windows(2) {
+            assert!(pair[0].addr < pair[1].addr, "sorted by address");
+        }
+
+        // Ground truth: the unstripped sibling's symbol starts, ±8 bytes.
+        let truth_info = elfinfo::load(&unstripped_path).expect("unstripped fixture parses");
+        let tol = functions::MEASURE_TOLERANCE;
+        let matched_truth = truth_info
+            .function_starts
+            .iter()
+            .filter(|t| heur.iter().any(|h| h.addr.abs_diff(**t) <= tol))
+            .count();
+        let matched_heur = heur
+            .iter()
+            .filter(|h| {
+                truth_info
+                    .function_starts
+                    .iter()
+                    .any(|t| h.addr.abs_diff(*t) <= tol)
+            })
+            .count();
+        let recall = matched_truth as f64 / truth_info.function_starts.len() as f64;
+        let precision = matched_heur as f64 / heur.len() as f64;
+        eprintln!(
+            "stripped fixture: {} heuristic starts vs {} symbol starts, \
+             precision {precision:.4}, recall {recall:.4}",
+            heur.len(),
+            truth_info.function_starts.len()
+        );
+        assert!(
+            precision >= 0.9,
+            "precision {precision} below 0.9 on the stripped fixture"
+        );
+        assert!(
+            recall >= 0.6,
+            "recall {recall} below 0.6 on the stripped fixture"
+        );
+
+        // And the extraction reports the heuristic as its source.
+        let ex = functions::extract_elf(&stripped_info);
+        assert_eq!(ex.source, functions::FunctionSource::Heuristic);
+        assert!(ex.reason.is_none());
+    }));
+    let _ = std::fs::remove_file(&tmp);
+    result.expect("stripped fixture assertions hold");
 }
 
 /// A functions.json payload - the same compid-model/v1 shape with `fn:` and

@@ -22,6 +22,13 @@ pub struct SectionInfo {
     /// true for SHT_NOBITS sections (`.bss`): a size is declared but no file
     /// bytes exist, so entropy cannot be computed.
     pub no_bits: bool,
+    /// Virtual address the section maps at (`sh_addr` on ELF; zero for
+    /// relocatable objects, where addresses are section offsets). The
+    /// stripped-binary prologue scan aligns candidates against it.
+    pub addr: u64,
+    /// true when the section holds machine code (`SHF_EXECINSTR` on ELF,
+    /// the execute flag on PE, a `__TEXT` section on Mach-O).
+    pub executable: bool,
 }
 
 /// Provenance labels read directly off an ELF file. `opt_level` is always
@@ -69,6 +76,11 @@ pub struct ElfInfo {
     /// Function symbols from the symbol table (empty for a stripped ELF or
     /// an ELF whose symtab holds no usable functions).
     pub functions: Vec<FunctionSymbol>,
+    /// Every located STT_FUNC symbol's address, zero-size ones included -
+    /// a size-less symbol still marks a function start. Empty for a
+    /// stripped ELF. This is the ground truth boundary measurement scores
+    /// the stripped-binary heuristic against.
+    pub function_starts: Vec<u64>,
     /// true when the file carries an SHT_SYMTAB section at all; the
     /// stripped-versus-no-functions distinction for error reporting.
     pub has_symtab: bool,
@@ -192,6 +204,8 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<ElfInfo> {
             offset,
             size: hdr.sh_size,
             no_bits,
+            addr: hdr.sh_addr,
+            executable: hdr.sh_flags & u64::from(sh::SHF_EXECINSTR) != 0,
         });
     }
 
@@ -215,7 +229,7 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<ElfInfo> {
     // Symbol `st_value` means different things in a relocatable object
     // (section offset) and a linked binary (virtual address).
     let is_rel = elf.header.e_type == eh::ET_REL;
-    let (functions, has_symtab) = enumerate_functions(&elf, is_rel);
+    let (functions, function_starts, has_symtab) = enumerate_functions(&elf, is_rel);
 
     Ok(ElfInfo {
         labels: ElfLabels {
@@ -235,6 +249,7 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<ElfInfo> {
         comment,
         sections,
         functions,
+        function_starts,
         has_symtab,
         file: data,
     })
@@ -245,24 +260,27 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<ElfInfo> {
 /// each resolved to a file offset through its containing executable
 /// section. In a relocatable object (`ET_REL`) `st_value` is an offset
 /// within the section; in a linked binary it is a virtual address matched
-/// against the section's `sh_addr`. Empty for a stripped ELF.
-fn enumerate_functions(elf: &goblin::elf::Elf, is_rel: bool) -> (Vec<FunctionSymbol>, bool) {
+/// against the section's `sh_addr`. Empty for a stripped ELF. Also returns
+/// every located STT_FUNC symbol's address (zero-size ones included) as
+/// the measurement ground truth.
+fn enumerate_functions(
+    elf: &goblin::elf::Elf,
+    is_rel: bool,
+) -> (Vec<FunctionSymbol>, Vec<u64>, bool) {
     let has_symtab = elf
         .section_headers
         .iter()
         .any(|hdr| hdr.sh_type == sh::SHT_SYMTAB);
     if !has_symtab {
-        return (Vec::new(), false);
+        return (Vec::new(), Vec::new(), false);
     }
 
     let mut functions: Vec<FunctionSymbol> = Vec::new();
+    let mut starts: HashSet<u64> = HashSet::new();
     let mut seen: HashSet<(u64, u64)> = HashSet::new();
     for sym in elf.syms.iter() {
-        if !sym.is_function() || sym.st_size == 0 {
+        if !sym.is_function() {
             continue;
-        }
-        if !seen.insert((sym.st_value, sym.st_size)) {
-            continue; // same (address, size) range already listed
         }
         // Special section indexes (SHN_UNDEF, SHN_ABS, SHN_COMMON, ...)
         // never name an executable section; the range check below also
@@ -296,6 +314,16 @@ fn enumerate_functions(elf: &goblin::elf::Elf, is_rel: bool) -> (Vec<FunctionSym
                 continue;
             }
         };
+        // A zero-size function symbol still marks a start (with an unknown
+        // end), so it feeds `function_starts` even though it never becomes
+        // a feature row.
+        starts.insert(sym.st_value);
+        if sym.st_size == 0 {
+            continue;
+        }
+        if !seen.insert((sym.st_value, sym.st_size)) {
+            continue; // same (address, size) range already listed
+        }
         let name = elf.strtab.get_at(sym.st_name).unwrap_or("").to_string();
         if name.is_empty() {
             continue;
@@ -308,7 +336,9 @@ fn enumerate_functions(elf: &goblin::elf::Elf, is_rel: bool) -> (Vec<FunctionSym
         });
     }
     functions.sort_by(|a, b| a.addr.cmp(&b.addr).then_with(|| a.name.cmp(&b.name)));
-    (functions, has_symtab)
+    let mut function_starts: Vec<u64> = starts.into_iter().collect();
+    function_starts.sort_unstable();
+    (functions, function_starts, has_symtab)
 }
 
 fn section_name_exists(elf: &goblin::elf::Elf, want: &str) -> bool {

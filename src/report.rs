@@ -191,17 +191,24 @@ pub fn display_name(name: &str) -> String {
 /// Render the per-function provenance table. When `model` is `Some`, rows
 /// carry prediction columns and the footer counts predicted families; when
 /// `reason` is `Some` there is nothing to list and the reason stands alone.
+/// `source` says where the boundaries came from; the heuristic one is
+/// called out in the header so synthesized names are never mistaken for
+/// symbol-table names.
 pub fn function_provenance(
     bin: &std::path::Path,
     build_id: &str,
     reason: Option<&str>,
     model: Option<(&std::path::Path, &str)>,
+    source: crate::functions::FunctionSource,
     rows: &[FunctionRow],
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!("binary: {}\n", bin.display()));
     if build_id != "none" {
         out.push_str(&format!("build-id: {build_id}\n"));
+    }
+    if source == crate::functions::FunctionSource::Heuristic {
+        out.push_str("function boundaries: prologue heuristic (stripped binary)\n");
     }
     if let Some((path, header)) = model {
         out.push_str(&format!("model:   {} ({})\n", path.display(), header));
@@ -346,6 +353,7 @@ mod tests {
                 Path::new("model/functions.json"),
                 "trained 2026-10-20, 3121 features",
             )),
+            crate::functions::FunctionSource::SymbolTable,
             &demo_rows(),
         );
         assert!(text.contains("binary: mixed-demo"));
@@ -367,7 +375,14 @@ mod tests {
                 r
             })
             .collect();
-        let text = function_provenance(Path::new("b"), "none", None, None, &rows);
+        let text = function_provenance(
+            Path::new("b"),
+            "none",
+            None,
+            None,
+            crate::functions::FunctionSource::SymbolTable,
+            &rows,
+        );
         assert!(!text.contains("compiler_family"));
         assert!(!text.contains("model:"));
         assert!(text.contains("2 functions\n"));
@@ -381,9 +396,33 @@ mod tests {
             "none",
             Some("no symbol table: binary looks stripped"),
             None,
+            crate::functions::FunctionSource::SymbolTable,
             &[],
         );
         assert!(text.contains("no functions: no symbol table: binary looks stripped"));
+    }
+
+    #[test]
+    fn function_table_notes_the_heuristic_boundaries() {
+        let text = function_provenance(
+            Path::new("stripped-demo"),
+            "none",
+            None,
+            None,
+            crate::functions::FunctionSource::Heuristic,
+            &demo_rows(),
+        );
+        assert!(text.contains("function boundaries: prologue heuristic (stripped binary)"));
+        // The symbol-table rendering stays clean of the note.
+        let plain = function_provenance(
+            Path::new("stripped-demo"),
+            "none",
+            None,
+            None,
+            crate::functions::FunctionSource::SymbolTable,
+            &demo_rows(),
+        );
+        assert!(!plain.contains("prologue heuristic"));
     }
 }
 

@@ -172,8 +172,10 @@ data comes from `compid functions-batch --features` into
 `training/train_functions.py`, whose hold-out split is by build (all
 functions of one binary stay on the same side) - the honest numbers and the
 limitations live in [`docs/FUNCTIONS-EVALUATION.md`](docs/FUNCTIONS-EVALUATION.md).
-This round covers unstripped ELF only; stripped-binary heuristics and
-PE/Mach-O symbol sources are next.
+A stripped x86-64 ELF works too: a conservative prologue scan proposes the
+boundaries (pooled precision 0.98 / recall 0.86 measured against symbol
+ground truth), and the mixed-demo script runs the same split assertion on a
+`strip`ped copy; PE/Mach-O symbol sources are next.
 
 ## The seed dataset
 
@@ -249,8 +251,8 @@ The near list, from [`docs/roadmap.md`](docs/roadmap.md):
   arm64) artifacts, and retrains on macos rows once the build matrix
   seeds them
 - more architectures - riscv64 and arm32 alongside x86-64 and aarch64
-- function-level classification - unstripped ELF done (see above);
-  stripped-binary heuristics and PE/Mach-O symbol sources remain
+- function-level classification - unstripped ELF and stripped x86-64 ELF
+  (prologue heuristic) done (see above); PE/Mach-O symbol sources remain
 - Ghidra and IDA plugins that load `model.json` directly
 - online model updates without a full retrain
 

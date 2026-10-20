@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Stripped-binary function boundaries for x86-64 ELF: `compid functions`
+  no longer gives up on a stripped binary - a conservative prologue scan
+  over the executable sections (frame-pointer prologues and the crt-stub
+  paired-`lea` shape at 16-byte alignment, CET `endbr64` sites with
+  PLT-stub and followup gates, decode-checked starts merged by straight-
+  line overlap, 16-byte minimum) proposes the boundaries with synthesized
+  `func_<hex addr>` names, marked `source: heuristic` in `--json` and by a
+  header note in the table. Measured, not promised: `compid functions
+  <BIN> --measure` scores the heuristic against symbol-table ground truth
+  at a ±8-byte tolerance, and the `scripts/measure_boundaries.py` sweep
+  over 40 linux-gnu x86_64 manifest rows spanning O0-Os lands at pooled
+  precision 0.9806 / recall 0.8588 (F1 0.9157). `functions-batch` now
+  emits stripped rows alongside symbol-table ones, and the mixed-demo
+  acceptance script runs its gcc/zig majority assertion on a `strip`ped
+  copy too (attribution by address against the unstripped run). Non-x86-64
+  ELFs, PEs, and Mach-Os keep their explicit reasons; PE/Mach-O symbol
+  sources and call-target analysis remain future work.
 - Hardened-build axis and hardening detection: the corpus gains 30 builds
   compiled with `-fstack-protector-all`, `-D_FORTIFY_SOURCE=2`, and
   `-fcf-protection=full` (new `hardening` manifest column), and the

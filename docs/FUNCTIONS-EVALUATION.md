@@ -35,9 +35,34 @@ There is also structural label noise the whole-binary trainer never faces. Every
 
 One multinomial logistic regression per field (`LogisticRegression(max_iter=3000, C=4.0, class_weight='balanced')`) over L2-normalized integer counts - the whole-binary recipe plus class weighting, because function rows inherit the matrix's toolchain skew (clang rows outnumber gcc roughly 2.5:1) and an unweighted fit let the prior swallow minority-toolchain functions inside mixed binaries. Disable with `--no-balanced`. Features seen in fewer than 50 functions are dropped (the whole-binary trainer's floor is 150; functions are small, so rare n-grams survive less often). The export is `compid-model/v1` - the same format as `model/model.json` - with only `compiler_family` and `opt_level` fields.
 
+## Stripped-binary boundaries — measured, not promised
+
+`compid functions` no longer refuses a stripped binary outright. For x86-64 ELF with no symbol table, a conservative prologue scan over the executable sections proposes function starts (the pattern set lives in one const array in `src/functions.rs`: `push rbp; mov rbp, rsp` and `push rbx; mov rbx, rdi` at 16-byte alignment, `endbr64` at any alignment with a frame-setup followup — and, at aligned sites, none — plus the paired-`lea` crt-stub shape and PLT-stub exclusions), and extraction proceeds with synthesized `func_<hex addr>` names, marked `source: heuristic` in the JSON and by a header note in the table. Nothing is guessed for other architectures: a stripped non-x86-64 ELF, a PE, and a Mach-O still report their explicit reasons.
+
+The heuristic is measured, not asserted. `compid functions <bin> --measure` runs the scan on an unstripped binary and scores its starts against the symbol table's starts at a ±8-byte tolerance; `scripts/measure_boundaries.py` sweeps a stratified sample over the manifest. The numbers below are the sweep over 40 linux-gnu x86_64 manifest rows (8 per optimization level, O0 through Os, seed 42) — re-run `scripts/measure_boundaries.py` against any manifest to reproduce the shape of this table:
+
+| pooled over 40 binaries | value |
+|-------------------------|-------|
+| symbol-table starts (ground truth) | 2713 |
+| heuristic starts | 2376 |
+| matched within ±8 bytes | 2330 |
+| precision | 0.9806 |
+| recall | 0.8588 |
+| F1 | 0.9157 |
+
+Per optimization level, pooled precision stays at 0.96-1.00 everywhere and pooled recall is 0.72-0.89 (O0 0.85, O1 0.74, O2 0.89, O3 0.75, Os 0.72). Eight further rows were skipped because their symbol tables carry no function symbols at all (zig-cc builds that list only undefined imports) — no ground truth, no measurement.
+
+What the residual misses are, honestly:
+
+- Functions with no prologue at all cannot be found by a prologue scan: `.text.unlikely` cold clones that open with an arbitrary instruction, gcc's `-Os` shrink-wrapped entries (`test rdi, rdi` first), and crt stubs like `register_tm_clones` on builds where the paired-`lea` shape does not appear.
+- Functions smaller than the 16-byte minimum: `.fini` (13 bytes) on every dynamic binary, and any function abutting its section's end.
+- These cost recall, not precision: across the sweep, wrong starts are rare (pooled precision 0.98), and the ones that occur sit at legitimate-looking prologues in padding.
+
+Recall is bounded, and that is the point of the conservative set: a missed function costs one vote in the per-binary majority, while a false start injects a vote for whatever the padding decodes as. The stripped mixed-toolchain demo (`scripts/mixed_demo.sh`, second half) runs the same gcc/zig majority assertion on a `strip`ped copy and passes: the gcc half majority-predicts gcc (main plus the merged gcc blob) and the zig half majority-predicts clang (5 of 6 attributed functions).
+
 ## Limitations
 
-- Function boundaries come from ELF symbol tables only: the training set is unstripped ELF, and that is also the only input `compid functions` accepts today. Stripped-binary heuristics and PE/Mach-O symbol sources are future work.
+- Stripped-binary boundaries are x86-64 ELF only, and heuristic recall is bounded by design (see the measured section above): functions without a recognizable prologue and sub-16-byte functions are not found. PE/Mach-O symbol sources remain future work.
 - Every function of a build shares the build's labels. A function inlined from a vendored, differently-built library is labeled with its container's toolchain, not its true generator; the mixed-demo split is the sanity check that the model reads code shape, not container residue (functions carry no `sec:`, `ent:`, or `cmt:` features).
 - Same-toolchain-version bias as the whole-binary seed: a toolchain the matrix never saw will get confident wrong answers.
 - Small functions (under a few dozen bytes) carry little signal; their votes are near-noise, which is one reason the majority vote matters more than any single function's confidence.

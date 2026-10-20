@@ -32,6 +32,9 @@ use crate::elfinfo::SectionInfo;
 /// no bytes in the file (the PE analog of ELF `SHT_NOBITS`).
 const SCN_CNT_UNINITIALIZED_DATA: u32 = 0x0000_0080;
 
+/// IMAGE_SCN_MEM_EXECUTE: the section holds machine code.
+const SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+
 /// Provenance labels read directly off a PE file. Mirrors
 /// [`crate::elfinfo::ElfLabels`]; see the module notes for what stays
 /// `unknown` and why.
@@ -156,6 +159,8 @@ pub fn parse(data: std::sync::Arc<Vec<u8>>) -> Result<PeInfo> {
             offset,
             size,
             no_bits,
+            addr: u64::from(hdr.virtual_address),
+            executable: hdr.characteristics & SCN_MEM_EXECUTE != 0,
         });
     }
 
