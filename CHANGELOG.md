@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   glibc/musl, armv7, armv6, riscv64, loongarch64, powerpc64le, s390x),
   Windows (x86-64 MSVC smoked for real on a Windows runner, plus x86-64/i686
   GNU and aarch64 via zig), macOS (aarch64, x86_64, and a universal2 fat
-  binary, natively linked), and FreeBSD/NetBSD x86-64 via cross-rs. Every
+  binary, natively linked), and FreeBSD x86-64 via cross-rs. Every
   archive is staged deterministically (epoch mtimes, root owner, sorted
   entries, timestamp-free gzip), the x86-64 musl build is exercised live in
   CI, and a combined `sha256sums` file lands on the release.

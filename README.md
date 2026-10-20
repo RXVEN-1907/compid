@@ -88,7 +88,7 @@ man page, docs) with a combined `sha256sums` file on the release:
 | Windows x86-64 | `x86_64-pc-windows-msvc.zip` (MSVC) · `x86_64-pc-windows-gnu.zip` |
 | Windows arm64 / 32-bit | `aarch64-pc-windows-gnullvm.zip` · `i686-pc-windows-gnu.zip` |
 | macOS aarch64 / x86-64 / universal | `aarch64-apple-darwin` · `x86_64-apple-darwin` · `universal2-apple-darwin` |
-| FreeBSD / NetBSD x86-64 | `x86_64-unknown-{freebsd,netbsd}.tar.gz` |
+| FreeBSD x86-64 | `x86_64-unknown-freebsd.tar.gz` |
 
 The x86-64 musl build is static and runs anywhere; the Windows MSVC build
 is smoked for real on a Windows runner (run + classify) on every release;
@@ -284,7 +284,7 @@ workflow builds the full matrix from the
 [Install](#install) table - Linux (glibc, musl, 32-bit, arm, riscv64,
 loongarch64, powerpc64le, s390x), Windows (MSVC + GNU, x86-64 and arm64),
 macOS (both architectures plus a universal2 fat binary), and
-FreeBSD/NetBSD - each with shell completions for
+FreeBSD - each with shell completions for
 bash/zsh/fish/PowerShell, the man page, and docs, staged
 byte-reproducibly and published with a combined sha256 checksums file.
 

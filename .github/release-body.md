@@ -43,7 +43,7 @@ bash/zsh/fish/PowerShell, the man page, and docs.
 | macOS aarch64 (Apple silicon) | `compid-0.2.0-aarch64-apple-darwin.tar.gz` |
 | macOS x86-64 (Intel) | `compid-0.2.0-x86_64-apple-darwin.tar.gz` |
 | macOS universal2 | `compid-0.2.0-universal2-apple-darwin.tar.gz` |
-| FreeBSD / NetBSD x86-64 | `compid-0.2.0-x86_64-unknown-{freebsd,netbsd}.tar.gz` |
+| FreeBSD x86-64 | `compid-0.2.0-x86_64-unknown-freebsd.tar.gz` |
 
 Verify with the combined checksums file:
 

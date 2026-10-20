@@ -12,8 +12,10 @@
 #             against Apple's SDK
 #   windows - x86_64-pc-windows-msvc, natively on a Windows runner, smoked
 #             for real (run + classify)
-#   bsd     - x86_64 FreeBSD and NetBSD via cross-rs (zig cannot supply a
-#             BSD libc, and these images ship the real thing)
+#   bsd     - x86_64 FreeBSD via cross-rs (zig cannot supply a BSD libc,
+#             and the image ships the real thing; NetBSD waits on a libc
+#             kevent-binding fix in the cross image, so it is not shipped
+#             rather than shipped red)
 #
 # Why cargo-zigbuild for the cross matrix: compid and all of its
 # dependencies are pure Rust, so zig only has to link; one tool covers
@@ -197,11 +199,7 @@ jobs:
           f="dist/compid-$version-${{ matrix.target }}.tar.gz"
           case "${{ matrix.target }}" in
             *windows*)
-              python3 - "$f" <<'PY'
-              import sys, zipfile
-              names = zipfile.ZipFile(sys.argv[1]).namelist()
-              assert any(n.endswith("/compid.exe") for n in names), names
-              PY
+              python3 -c "import sys, zipfile; assert any(n.endswith('/compid.exe') for n in zipfile.ZipFile(sys.argv[1]).namelist()), 'no compid.exe in zip'" "$f"
               ;;
             *)
               rm -rf /tmp/dist-check && mkdir /tmp/dist-check
@@ -335,7 +333,9 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           rm -rf /tmp/dist-check && mkdir -p /tmp/dist-check
-          tar -xf "dist/compid-$version-x86_64-pc-windows-msvc.zip" -C /tmp/dist-check
+          # git-bash's tar is GNU tar, which cannot read zip; python's
+          # zipfile is the portable extractor on the runner.
+          python3 -m zipfile -e "dist/compid-$version-x86_64-pc-windows-msvc.zip" /tmp/dist-check
           /tmp/dist-check/compid-$version-x86_64-pc-windows-msvc/compid.exe --version
           /tmp/dist-check/compid-$version-x86_64-pc-windows-msvc/compid.exe classify \
             tests/fixtures/gcc13_O2_x86_64_pie_dynamic | grep -q "trained"
@@ -356,7 +356,6 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-freebsd
-          - target: x86_64-unknown-netbsd
     steps:
       - uses: actions/checkout@v4
 
